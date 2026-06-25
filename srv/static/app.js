@@ -483,6 +483,22 @@ mapEl.addEventListener('touchstart', e=>{ if(e.touches.length===1) onDown(e); },
 mapEl.addEventListener('touchmove', e=>{ if(painting){ e.preventDefault(); onMove(e); } }, {passive:false});
 window.addEventListener('touchend', onUp);
 
+// tap (any tool, incl. pan) reveals the info tooltip for the hex under the finger/cursor.
+// On touch there's no hover, so this is the only way to inspect a cell while panning.
+// We measure pointer travel ourselves: a pan drag shouldn't be treated as a tap.
+let tapStart=null;
+function tapXY(e){ const o=(e.touches&&e.touches[0])||(e.changedTouches&&e.changedTouches[0])||e; return [o.clientX,o.clientY]; }
+mapEl.addEventListener('mousedown', e=>{ tapStart=tapXY(e); });
+mapEl.addEventListener('touchstart', e=>{ tapStart=tapXY(e); }, {passive:true});
+function handleTap(e){
+  if(!grid||!me||!me.authed||!tapStart) return;
+  const [x,y]=tapXY(e), [sx,sy]=tapStart; tapStart=null;
+  if(Math.hypot(x-sx,y-sy)>8) return;   // moved too far -> it was a pan/drag, not a tap
+  updateHovertip(cellAt(eventLatLng(e)), e);
+}
+mapEl.addEventListener('click', handleTap);
+mapEl.addEventListener('touchend', handleTap, {passive:true});
+
 // ---------- legend ----------
 function renderLegend(){
   const body=document.getElementById('legendBody'); body.innerHTML='';
@@ -866,8 +882,8 @@ async function loadGrid(){
 // hex is ~10 km² near the data's latitude. Cell ids are a stable function of
 // (row,col), so drawings persist as you pan/zoom.
 const DLON=0.0260618, DLAT=0.0298990; // column / row pitch in degrees
-const GLOBAL_MIN_Z=8;                  // below this, the grid is too dense to draw
-const MAX_CELLS=45000;                 // safety cap per viewport
+const GLOBAL_MIN_Z=7;                  // below this, the grid is too dense to draw
+const MAX_CELLS=300000;                // safety cap per viewport
 function gid(r,c){ return (c+16384)*40000 + (r+16384); }
 function ungid(id){ return {r:(id%40000)-16384, c:Math.floor(id/40000)-16384}; }
 // centroid lon/lat of a cell id on the global lattice
@@ -942,7 +958,7 @@ async function bootBoma(){
   document.getElementById('legendTitle').textContent='Land use';
   map.setMinZoom(2); map.setMaxZoom(19);
   sizeCanvas();
-  setTool('draw');
+  setTool('pan');
   // zoom-in hint (shared with global mode)
   if(!document.getElementById('zoomhint')){
     const h=document.createElement('div'); h.id='zoomhint'; h.className='panel';
