@@ -843,8 +843,9 @@ function applyServerState(r){
 }
 function normSt(st){ const o={}; if(st.u)o.u=st.u; if(st.w)o.w=1; if(st.grp)o.grp=st.grp; if(st.nt)o.nt=st.nt; return o; }
 
-async function loadGrid(){
-  const res=await fetch('/static/data/grid.json'); grid=await res.json();
+// install a grid object: cache per-cell bboxes, index by id, build adjacency.
+function installGrid(g){
+  grid=g; cellById=new Map(); nearestScale=null;
   for(const c of grid.cells){
     let minx=Infinity,miny=Infinity,maxx=-Infinity,maxy=-Infinity;
     for(const p of c.g){ if(p[0]<minx)minx=p[0]; if(p[0]>maxx)maxx=p[0]; if(p[1]<miny)miny=p[1]; if(p[1]>maxy)maxy=p[1]; }
@@ -852,8 +853,65 @@ async function loadGrid(){
     cellById.set(c.id,c);
   }
   buildAdjacency();
+}
+
+async function loadGrid(){
+  const res=await fetch('/static/data/grid.json'); installGrid(await res.json());
   const bb=grid.bounds; // [w,s,e,n]
   map.fitBounds([[bb[1],bb[0]],[bb[3],bb[2]]], {padding:[20,20]});
+}
+
+// ---------- dynamic ~10 km² hex grid (global mode) ----------
+// Flat-top hexes on a global lattice. Pitch matches the original Boma grid so a
+// hex is ~10 km² near the data's latitude. Cell ids are a stable function of
+// (row,col), so drawings persist as you pan/zoom.
+const DLON=0.0260618, DLAT=0.0298990; // column / row pitch in degrees
+const GLOBAL_MIN_Z=8;                  // below this, the grid is too dense to draw
+const MAX_CELLS=45000;                 // safety cap per viewport
+function gid(r,c){ return (c+16384)*40000 + (r+16384); }
+function ungid(id){ return {r:(id%40000)-16384, c:Math.floor(id/40000)-16384}; }
+// centroid lon/lat of a cell id on the global lattice
+function gidCentroid(id){ const {r,c}=ungid(id); const shift=(c&1)?DLAT/2:0; return [c*DLON, -(r*DLAT)-shift]; }
+function genGrid(west,south,east,north){
+  const R=DLON/1.5, halfR=R/2, halfH=DLAT/2;
+  const w=west-DLON*2, e=east+DLON*2, s=south-DLAT*2, n=north+DLAT*2;
+  const cmin=Math.floor(w/DLON), cmax=Math.ceil(e/DLON);
+  if((cmax-cmin+1)*((n-s)/DLAT+2) > MAX_CELLS) return null;
+  const rnd=v=>Math.round(v*1e5)/1e5;
+  const cells=[];
+  for(let c=cmin;c<=cmax;c++){
+    const x=c*DLON, shift=(c&1)?halfH:0;
+    const rmin=Math.floor((-n-shift)/DLAT), rmax=Math.ceil((-s-shift)/DLAT);
+    for(let r=rmin;r<=rmax;r++){
+      const y=-(r*DLAT)-shift;
+      const g=[[rnd(x-R),rnd(y)],[rnd(x-halfR),rnd(y+halfH)],[rnd(x+halfR),rnd(y+halfH)],
+              [rnd(x+R),rnd(y)],[rnd(x+halfR),rnd(y-halfH)],[rnd(x-halfR),rnd(y-halfH)]];
+      cells.push({id:gid(r,c),r,c,ct:[rnd(x),rnd(y)],g});
+    }
+  }
+  const latc=(s+n)/2;
+  const area=(DLON*111.320*Math.cos(latc*Math.PI/180))*(DLAT*110.574); // km² at this latitude
+  return {crs:'EPSG:4326',bounds:[w,s,e,n],cellAreaKm2:area,count:cells.length,cells};
+}
+// regenerate the grid for the current viewport, debounced. Used by BOTH modes:
+// the grid is now a dynamic global lattice; Boma just starts focused on its data.
+let regenTimer=null;
+function scheduleRegen(){ clearTimeout(regenTimer); regenTimer=setTimeout(regenGlobalGrid,120); }
+function regenGlobalGrid(){
+  if(!me) return;
+  const hint=document.getElementById('zoomhint');
+  if(map.getZoom() < GLOBAL_MIN_Z){
+    grid=null; cellById=new Map();
+    ctx && ctx.clearRect(0,0,map.getSize().x,map.getSize().y);
+    if(hint) hint.classList.remove('hidden');
+    return;
+  }
+  const b=map.getBounds().pad(0.2);
+  const g=genGrid(b.getWest(),b.getSouth(),b.getEast(),b.getNorth());
+  if(!g){ if(hint) hint.classList.remove('hidden'); return; }
+  if(hint) hint.classList.add('hidden');
+  installGrid(g);
+  scheduleDraw();
 }
 
 // build hex adjacency from shared edges (vertices are exact across neighbours)
@@ -882,11 +940,22 @@ async function bootBoma(){
   document.body.classList.remove('global-mode');
   document.body.classList.add('boma-mode');
   document.getElementById('legendTitle').textContent='Land use';
-  if(!grid) await loadGrid();
+  map.setMinZoom(2); map.setMaxZoom(19);
   sizeCanvas();
   setTool('draw');
+  // zoom-in hint (shared with global mode)
+  if(!document.getElementById('zoomhint')){
+    const h=document.createElement('div'); h.id='zoomhint'; h.className='panel';
+    h.textContent='Zoom in to draw the 10 km² hex grid';
+    document.body.appendChild(h);
+  }
   const st=await api('/api/state','GET');
   if(st&&st.cells) applyServerState(st);
+  // fit to the extent of the loaded data (cell ids encode lat/lon on the lattice),
+  // then generate the dynamic grid and keep it in sync on pan/zoom.
+  fitToData();
+  regenGlobalGrid();
+  map.on('moveend zoomend', scheduleRegen);
   // shared version view?
   const vtok=new URLSearchParams(location.search).get('v');
   if(vtok){ loadSharedVersion(vtok); }
@@ -894,14 +963,35 @@ async function bootBoma(){
   renderLegend();
 }
 
+// fit the map to the bounding box of whatever cells are currently in `state`.
+function fitToData(){
+  if(!state.size){ map.setView([7,33.5], 9); return; }
+  let w=Infinity,s=Infinity,e=-Infinity,n=-Infinity;
+  for(const id of state.keys()){ const [lon,lat]=gidCentroid(id);
+    if(lon<w)w=lon; if(lon>e)e=lon; if(lat<s)s=lat; if(lat>n)n=lat; }
+  map.fitBounds([[s,w],[n,e]], {padding:[20,20], maxZoom:11});
+}
+
 // Global mode: a blank world map you can pan / zoom and jump to a country.
-function bootGlobal(){
+async function bootGlobal(){
   document.body.classList.remove('boma-mode');
   document.body.classList.add('global-mode');
-  grid=null; state.clear();
+  grid=null; cellById=new Map(); state.clear();
   map.setMinZoom(2); map.setMaxZoom(19);
   map.setView([20,0], 2);
+  sizeCanvas(); setTool('pan');
   ctx && ctx.clearRect(0,0,map.getSize().x,map.getSize().y);
+  // zoom-in hint shown when the viewport is too zoomed-out to draw the grid
+  if(!document.getElementById('zoomhint')){
+    const h=document.createElement('div'); h.id='zoomhint'; h.className='panel';
+    h.textContent='Zoom in to draw the 10 km² hex grid';
+    document.body.appendChild(h);
+  }
+  // a blank canvas: regenerate the dynamic grid for the current view, then keep
+  // it in sync as the user pans / zooms. (Global mode shares the cell store with
+  // Boma, so we don't preload it here — it stays a clean drawing surface.)
+  regenGlobalGrid();
+  map.on('moveend zoomend', scheduleRegen);
   // a simple country search box
   let bar=document.getElementById('countrybar');
   if(!bar){
@@ -914,6 +1004,7 @@ function bootGlobal(){
     inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){ clearTimeout(t); countrySearch(inp.value.trim()); } });
   }
   bar.style.display='';
+  renderLegend();
 }
 
 async function countrySearch(q){

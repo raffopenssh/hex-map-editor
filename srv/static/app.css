@@ -121,9 +121,13 @@ html,body{margin:0;height:100%;font-family:-apple-system,BlinkMacSystemFont,"Seg
 #countryResults .cr-item{padding:8px 10px;border-radius:8px;font-size:13px;cursor:pointer;color:var(--ink)}
 #countryResults .cr-item:hover{background:#f0efe9}
 #countryResults .cr-item.muted{color:var(--muted);cursor:default}
-/* in global mode hide the editing chrome */
-body.global-mode #legend,body.global-mode #toolbar,body.global-mode #brushctl,
-body.global-mode #statusbar,body.global-mode #geoBtn{display:none!important}
+/* global mode is now a full editor too — only the geolocation button stays hidden */
+body.global-mode #geoBtn{display:none!important}
+/* zoom-in hint shown when the view is too coarse to render the grid */
+#zoomhint{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:1100;
+  padding:10px 16px;font-size:14px;color:var(--muted);pointer-events:none;
+  background:rgba(255,255,255,.92);border-radius:12px}
+#zoomhint.hidden{display:none}
 
 @media (max-width:560px){
   #legend{max-width:46vw;font-size:12px}
