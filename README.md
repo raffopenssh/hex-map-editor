@@ -1,8 +1,7 @@
 # hex-map-editor — Land Use Zonation editor
 
 A minimal mobile + desktop web editor for assigning land use to a hexagonal
-grid (~10 km² per cell) over a light basemap. Built for the Tango Team land-use
-zonation workflow (Jonglei / Boma, South Sudan), but the grid is a **dynamic
+grid (~10 km² per cell) over a light basemap. The grid is a **dynamic
 global lattice** — it works for any country / canvas, not just the seeded extent.
 
 ## Features
@@ -31,7 +30,6 @@ global lattice** — it works for any country / canvas, not just the seeded exte
   keep it, share its `?v=<token>` link, or restore. Naming an autosave promotes
   it so it won't be pruned (last 50 autosaves are kept).
 - **Two modes by secret** (no real accounts — just a name + secret):
-  - `boma@250626` → the original Boma / Jonglei land-use data + full hex editor.
   - any other secret → a blank global world map you can pan and zoom to a country.
 - **Sign out** clears the session cookie (auth is the cookie alone — owner email
   no longer auto-authenticates, so signing out actually signs you out).
@@ -58,7 +56,6 @@ Requires Go 1.21+.
 Open http://localhost:8000. The SQLite database (`db.sqlite3`) and Boma seed are
 created/applied automatically on first run. Sign in with a name + secret:
 
-- `boma@250626` → the Boma / Jonglei land-use data + full hex editor.
 - any other secret → a blank global canvas (pan/zoom to any country and draw).
 
 ## Deploy (systemd)
