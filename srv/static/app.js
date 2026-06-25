@@ -602,18 +602,14 @@ document.getElementById('sbDelete').onclick=()=>{
   api('/api/update','POST',{op:'delete', ids}).then(r=>{rev=r.rev;});
   renderLegend(); scheduleDraw();
 };
-// Ungroup / dissolve: remove the group label from the selected cells (and, if
-// you selected a whole group, the entire group dissolves).
+// Ungroup: remove the group label from exactly the selected cells. Predictable
+// — it acts on what you selected, nothing more.
 document.getElementById('sbDissolve').onclick=()=>{
-  // expand selection to full groups so "dissolve" truly removes the group
-  const grps=new Set();
-  for(const id of selection){ const g=(state.get(id)||{}).grp; if(g) grps.add(g); }
-  if(!grps.size){ toast('No group in selection'); return; }
-  const ids=[];
-  for(const [id,st] of state){ if(st.grp && grps.has(st.grp)) ids.push(id); }
+  const ids=[...selection].filter(id=>(state.get(id)||{}).grp);
+  if(!ids.length){ toast('No grouped hexes in selection'); return; }
   ids.forEach(id=>setLocal(id,{grp:''}));
   api('/api/update','POST',{op:'group', ids, value:''}).then(r=>{rev=r.rev;});
-  toast('Dissolved '+grps.size+' group'+(grps.size>1?'s':''));
+  toast('Ungrouped '+ids.length+' hex'+(ids.length>1?'es':''));
   markDirty(); renderLegend(); scheduleDraw();
 };
 document.getElementById('sbGroup').onclick=()=>groupSheet();
