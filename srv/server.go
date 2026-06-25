@@ -33,13 +33,13 @@ type Server struct {
 
 // scheduleAutosave debounces autosave snapshots so a burst of edits (a paint
 // stroke) collapses into one snapshot a few seconds after activity settles.
-func (s *Server) scheduleAutosave(by string) {
+func (s *Server) scheduleAutosave(by, mode string) {
 	s.autoMu.Lock()
 	defer s.autoMu.Unlock()
 	if s.autoTimer != nil {
 		s.autoTimer.Stop()
 	}
-	s.autoTimer = time.AfterFunc(4*time.Second, func() { s.autosaveSnapshot(by) })
+	s.autoTimer = time.AfterFunc(4*time.Second, func() { s.autosaveSnapshot(by, mode) })
 }
 
 func New(dbPath, hostname string) (*Server, error) {
@@ -129,7 +129,8 @@ func (s *Server) seedIfNeeded() error {
 		return err
 	}
 	defer tx.Rollback()
-	stmt, err := tx.Prepare("INSERT INTO cells(cell_id,land_use,wildlife,rev,updated_by) VALUES(?,?,?,?,'seed') ON CONFLICT(cell_id) DO NOTHING")
+	// the seed is the Boma map.
+	stmt, err := tx.Prepare("INSERT INTO cells(cell_id,mode,land_use,wildlife,rev,updated_by) VALUES(?,'boma',?,?,?,'seed') ON CONFLICT(mode,cell_id) DO NOTHING")
 	if err != nil {
 		return err
 	}
@@ -381,10 +382,10 @@ type cellState struct {
 	Nt  string `json:"nt,omitempty"`
 }
 
-func (s *Server) loadState() (int64, map[string]cellState, error) {
+func (s *Server) loadState(mode string) (int64, map[string]cellState, error) {
 	var rev int64
 	_ = s.DB.QueryRow("SELECT CAST(value AS INTEGER) FROM meta WHERE key='rev'").Scan(&rev)
-	rows, err := s.DB.Query("SELECT cell_id, COALESCE(land_use,''), wildlife, COALESCE(grp,''), COALESCE(note,'') FROM cells WHERE land_use IS NOT NULL OR wildlife=1 OR grp IS NOT NULL OR note IS NOT NULL")
+	rows, err := s.DB.Query("SELECT cell_id, COALESCE(land_use,''), wildlife, COALESCE(grp,''), COALESCE(note,'') FROM cells WHERE mode=? AND (land_use IS NOT NULL OR wildlife=1 OR grp IS NOT NULL OR note IS NOT NULL)", mode)
 	if err != nil {
 		return rev, nil, err
 	}
@@ -408,7 +409,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 401, map[string]string{"error": "auth required"})
 		return
 	}
-	rev, cells, err := s.loadState()
+	rev, cells, err := s.loadState(id.Mode)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -450,41 +451,42 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	by := firstNonEmpty(id.Name, "Editor")
+	mode := id.Mode
 	for _, cid := range req.IDs {
 		switch req.Op {
 		case "setUse":
-			_, err = tx.Exec(`INSERT INTO cells(cell_id,land_use,rev,updated_by) VALUES(?,?,?,?)
-				ON CONFLICT(cell_id) DO UPDATE SET land_use=excluded.land_use,rev=excluded.rev,updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP`,
-				cid, req.Value, rev, by)
+			_, err = tx.Exec(`INSERT INTO cells(cell_id,mode,land_use,rev,updated_by) VALUES(?,?,?,?,?)
+				ON CONFLICT(mode,cell_id) DO UPDATE SET land_use=excluded.land_use,rev=excluded.rev,updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP`,
+				cid, mode, req.Value, rev, by)
 		case "clearUse":
-			_, err = tx.Exec(`UPDATE cells SET land_use=NULL,rev=?,updated_by=? WHERE cell_id=?`, rev, by, cid)
+			_, err = tx.Exec(`UPDATE cells SET land_use=NULL,rev=?,updated_by=? WHERE mode=? AND cell_id=?`, rev, by, mode, cid)
 		case "setWildlife":
 			fl := 0
 			if req.Flag {
 				fl = 1
 			}
-			_, err = tx.Exec(`INSERT INTO cells(cell_id,wildlife,rev,updated_by) VALUES(?,?,?,?)
-				ON CONFLICT(cell_id) DO UPDATE SET wildlife=excluded.wildlife,rev=excluded.rev,updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP`,
-				cid, fl, rev, by)
+			_, err = tx.Exec(`INSERT INTO cells(cell_id,mode,wildlife,rev,updated_by) VALUES(?,?,?,?,?)
+				ON CONFLICT(mode,cell_id) DO UPDATE SET wildlife=excluded.wildlife,rev=excluded.rev,updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP`,
+				cid, mode, fl, rev, by)
 		case "group":
 			var grp interface{}
 			if req.Value != "" {
 				grp = req.Value
 			}
-			_, err = tx.Exec(`INSERT INTO cells(cell_id,grp,rev,updated_by) VALUES(?,?,?,?)
-				ON CONFLICT(cell_id) DO UPDATE SET grp=excluded.grp,rev=excluded.rev,updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP`,
-				cid, grp, rev, by)
+			_, err = tx.Exec(`INSERT INTO cells(cell_id,mode,grp,rev,updated_by) VALUES(?,?,?,?,?)
+				ON CONFLICT(mode,cell_id) DO UPDATE SET grp=excluded.grp,rev=excluded.rev,updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP`,
+				cid, mode, grp, rev, by)
 		case "note":
 			var nt interface{}
 			if req.Value != "" {
 				nt = req.Value
 			}
-			_, err = tx.Exec(`INSERT INTO cells(cell_id,note,rev,updated_by) VALUES(?,?,?,?)
-				ON CONFLICT(cell_id) DO UPDATE SET note=excluded.note,rev=excluded.rev,updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP`,
-				cid, nt, rev, by)
+			_, err = tx.Exec(`INSERT INTO cells(cell_id,mode,note,rev,updated_by) VALUES(?,?,?,?,?)
+				ON CONFLICT(mode,cell_id) DO UPDATE SET note=excluded.note,rev=excluded.rev,updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP`,
+				cid, mode, nt, rev, by)
 		case "delete":
 			// clear everything for the cell
-			_, err = tx.Exec(`UPDATE cells SET land_use=NULL,wildlife=0,grp=NULL,note=NULL,rev=?,updated_by=? WHERE cell_id=?`, rev, by, cid)
+			_, err = tx.Exec(`UPDATE cells SET land_use=NULL,wildlife=0,grp=NULL,note=NULL,rev=?,updated_by=? WHERE mode=? AND cell_id=?`, rev, by, mode, cid)
 		default:
 			writeJSON(w, 400, map[string]string{"error": "unknown op"})
 			return
@@ -503,14 +505,14 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	for _, cid := range req.IDs {
 		var lu, grp, nt string
 		var wl int
-		err := s.DB.QueryRow("SELECT COALESCE(land_use,''),wildlife,COALESCE(grp,''),COALESCE(note,'') FROM cells WHERE cell_id=?", cid).Scan(&lu, &wl, &grp, &nt)
+		err := s.DB.QueryRow("SELECT COALESCE(land_use,''),wildlife,COALESCE(grp,''),COALESCE(note,'') FROM cells WHERE mode=? AND cell_id=?", mode, cid).Scan(&lu, &wl, &grp, &nt)
 		if err == nil {
 			changed[strconv.Itoa(cid)] = cellState{U: lu, W: wl, Grp: grp, Nt: nt}
 		} else {
 			changed[strconv.Itoa(cid)] = cellState{}
 		}
 	}
-	s.scheduleAutosave(firstNonEmpty(id.Name, "Editor"))
+	s.scheduleAutosave(firstNonEmpty(id.Name, "Editor"), id.Mode)
 	writeJSON(w, 200, map[string]interface{}{"rev": rev, "changed": changed})
 }
 
@@ -522,7 +524,8 @@ func (s *Server) handleVersionsList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 401, map[string]string{"error": "auth required"})
 		return
 	}
-	rows, err := s.DB.Query("SELECT token,name,COALESCE(author,''),COALESCE(kind,'named'),created_at FROM versions ORDER BY id DESC")
+	// only show snapshots belonging to the caller's map (mode) — never another secret's.
+	rows, err := s.DB.Query("SELECT token,name,COALESCE(author,''),COALESCE(kind,'named'),created_at FROM versions WHERE mode=? ORDER BY id DESC", id.Mode)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -550,14 +553,14 @@ func (s *Server) handleVersionSave(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = "v" + time.Now().Format("2006-01-02 15:04")
 	}
-	_, cells, err := s.loadState()
+	_, cells, err := s.loadState(id.Mode)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
 	data, _ := json.Marshal(cells)
 	tok := randToken(9)
-	_, err = s.DB.Exec("INSERT INTO versions(token,name,author,data,kind) VALUES(?,?,?,?,'named')", tok, name, firstNonEmpty(id.Name, "Editor"), string(data))
+	_, err = s.DB.Exec("INSERT INTO versions(token,name,author,data,kind,mode) VALUES(?,?,?,?,'named',?)", tok, name, firstNonEmpty(id.Name, "Editor"), string(data), id.Mode)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -580,7 +583,7 @@ func (s *Server) handleVersionRename(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "name required"})
 		return
 	}
-	res, err := s.DB.Exec("UPDATE versions SET name=?, kind='named' WHERE token=?", strings.TrimSpace(body.Name), tok)
+	res, err := s.DB.Exec("UPDATE versions SET name=?, kind='named' WHERE token=? AND mode=?", strings.TrimSpace(body.Name), tok, id.Mode)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -595,26 +598,29 @@ func (s *Server) handleVersionRename(w http.ResponseWriter, r *http.Request) {
 // autosaveSnapshot stores the current state as an automatic version. Keeps every
 // reasonable snapshot: it skips saving when nothing changed since the last
 // autosave, and prunes only old *auto* snapshots (named versions are kept).
-func (s *Server) autosaveSnapshot(by string) {
-	_, cells, err := s.loadState()
+func (s *Server) autosaveSnapshot(by, mode string) {
+	if mode == "" {
+		mode = modeBoma
+	}
+	_, cells, err := s.loadState(mode)
 	if err != nil {
 		return
 	}
 	data, _ := json.Marshal(cells)
-	// dedupe against most recent autosave
+	// dedupe against most recent autosave for THIS map
 	var last string
-	_ = s.DB.QueryRow("SELECT data FROM versions WHERE kind='auto' ORDER BY id DESC LIMIT 1").Scan(&last)
+	_ = s.DB.QueryRow("SELECT data FROM versions WHERE kind='auto' AND mode=? ORDER BY id DESC LIMIT 1", mode).Scan(&last)
 	if last == string(data) {
 		return
 	}
 	name := "Autosave " + time.Now().Format("Jan 2 15:04")
 	tok := randToken(9)
-	if _, err := s.DB.Exec("INSERT INTO versions(token,name,author,data,kind) VALUES(?,?,?,?,'auto')", tok, name, firstNonEmpty(by, "Editor"), string(data)); err != nil {
+	if _, err := s.DB.Exec("INSERT INTO versions(token,name,author,data,kind,mode) VALUES(?,?,?,?,'auto',?)", tok, name, firstNonEmpty(by, "Editor"), string(data), mode); err != nil {
 		return
 	}
-	// prune: keep the most recent 50 autosaves
-	_, _ = s.DB.Exec(`DELETE FROM versions WHERE kind='auto' AND id NOT IN (
-		SELECT id FROM versions WHERE kind='auto' ORDER BY id DESC LIMIT 50)`)
+	// prune: keep the most recent 50 autosaves per map
+	_, _ = s.DB.Exec(`DELETE FROM versions WHERE kind='auto' AND mode=? AND id NOT IN (
+		SELECT id FROM versions WHERE kind='auto' AND mode=? ORDER BY id DESC LIMIT 50)`, mode, mode)
 }
 
 func (s *Server) handleVersionGet(w http.ResponseWriter, r *http.Request) {
@@ -627,7 +633,7 @@ func (s *Server) handleVersionGet(w http.ResponseWriter, r *http.Request) {
 	tok := r.PathValue("token")
 	var name, auth, data string
 	var created time.Time
-	err := s.DB.QueryRow("SELECT name,COALESCE(author,''),data,created_at FROM versions WHERE token=?", tok).Scan(&name, &auth, &data, &created)
+	err := s.DB.QueryRow("SELECT name,COALESCE(author,''),data,created_at FROM versions WHERE token=? AND mode=?", tok, id.Mode).Scan(&name, &auth, &data, &created)
 	if err != nil {
 		writeJSON(w, 404, map[string]string{"error": "not found"})
 		return
@@ -645,7 +651,8 @@ func (s *Server) handleVersionRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	tok := r.PathValue("token")
 	var data string
-	if err := s.DB.QueryRow("SELECT data FROM versions WHERE token=?", tok).Scan(&data); err != nil {
+	// only restore a snapshot that belongs to the caller's map.
+	if err := s.DB.QueryRow("SELECT data FROM versions WHERE token=? AND mode=?", tok, id.Mode).Scan(&data); err != nil {
 		writeJSON(w, 404, map[string]string{"error": "not found"})
 		return
 	}
@@ -654,15 +661,15 @@ func (s *Server) handleVersionRestore(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := s.replaceAll(cells, firstNonEmpty(id.Name, "Editor")); err != nil {
+	if err := s.replaceAll(cells, firstNonEmpty(id.Name, "Editor"), id.Mode); err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	rev, all, _ := s.loadState()
+	rev, all, _ := s.loadState(id.Mode)
 	writeJSON(w, 200, map[string]interface{}{"rev": rev, "cells": all})
 }
 
-func (s *Server) replaceAll(cells map[string]cellState, by string) error {
+func (s *Server) replaceAll(cells map[string]cellState, by, mode string) error {
 	rev, err := s.nextRev()
 	if err != nil {
 		return err
@@ -672,10 +679,11 @@ func (s *Server) replaceAll(cells map[string]cellState, by string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec("DELETE FROM cells"); err != nil {
+	// only replace THIS map's cells — never touch another secret's data.
+	if _, err := tx.Exec("DELETE FROM cells WHERE mode=?", mode); err != nil {
 		return err
 	}
-	stmt, err := tx.Prepare("INSERT INTO cells(cell_id,land_use,wildlife,grp,note,rev,updated_by) VALUES(?,?,?,?,?,?,?)")
+	stmt, err := tx.Prepare("INSERT INTO cells(cell_id,mode,land_use,wildlife,grp,note,rev,updated_by) VALUES(?,?,?,?,?,?,?,?)")
 	if err != nil {
 		return err
 	}
@@ -694,7 +702,7 @@ func (s *Server) replaceAll(cells map[string]cellState, by string) error {
 		if c.Nt != "" {
 			nt = c.Nt
 		}
-		if _, err := stmt.Exec(cid, lu, c.W, grp, nt, rev, by); err != nil {
+		if _, err := stmt.Exec(cid, mode, lu, c.W, grp, nt, rev, by); err != nil {
 			return err
 		}
 	}
@@ -710,7 +718,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmtq := r.URL.Query().Get("fmt")
-	_, cells, err := s.loadState()
+	_, cells, err := s.loadState(id.Mode)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -856,8 +864,9 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	by := firstNonEmpty(id.Name, "Editor")
+	mode := id.Mode
 	if body.Mode == "replace" {
-		if err := s.replaceAll(parsed, by); err != nil {
+		if err := s.replaceAll(parsed, by, mode); err != nil {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 			return
 		}
@@ -866,8 +875,8 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		rev, _ := s.nextRev()
 		tx, _ := s.DB.Begin()
 		defer tx.Rollback()
-		stmt, _ := tx.Prepare(`INSERT INTO cells(cell_id,land_use,wildlife,grp,note,rev,updated_by) VALUES(?,?,?,?,?,?,?)
-			ON CONFLICT(cell_id) DO UPDATE SET land_use=excluded.land_use,wildlife=excluded.wildlife,grp=excluded.grp,note=excluded.note,rev=excluded.rev,updated_by=excluded.updated_by`)
+		stmt, _ := tx.Prepare(`INSERT INTO cells(cell_id,mode,land_use,wildlife,grp,note,rev,updated_by) VALUES(?,?,?,?,?,?,?,?)
+			ON CONFLICT(mode,cell_id) DO UPDATE SET land_use=excluded.land_use,wildlife=excluded.wildlife,grp=excluded.grp,note=excluded.note,rev=excluded.rev,updated_by=excluded.updated_by`)
 		for k, c := range parsed {
 			cid, err := strconv.Atoi(k)
 			if err != nil {
@@ -883,11 +892,11 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 			if c.Nt != "" {
 				nt = c.Nt
 			}
-			stmt.Exec(cid, lu, c.W, grp, nt, rev, by)
+			stmt.Exec(cid, mode, lu, c.W, grp, nt, rev, by)
 		}
 		tx.Commit()
 	}
-	rev, all, _ := s.loadState()
+	rev, all, _ := s.loadState(mode)
 	writeJSON(w, 200, map[string]interface{}{"rev": rev, "cells": all, "imported": len(parsed)})
 }
 
