@@ -607,8 +607,8 @@ function onGeo(pos){
   geoBtn.classList.remove('locating'); geoBtn.classList.add('on');
   if(first){
     geoBtn.title = 'Hide my location';
-    if(c) map.setView([lat,lng], Math.max(map.getZoom(), 10), {animate:true});
-    else toast('You are outside the mapped area');
+    // smooth pan only — keep the current zoom, just glide so the location is centred.
+    map.panTo([lat,lng], {animate:true, duration:0.8, easeLinearity:0.25});
   }
   if(!geoAnimating) geoPulseLoop();
   scheduleDraw();
