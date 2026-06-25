@@ -542,9 +542,14 @@ function setTool(t){
   mapEl.classList.remove('tool-draw','tool-erase','tool-select','tool-pan');
   mapEl.classList.add('tool-'+t);
   // brush only matters when painting (draw / erase); it auto appears/disappears.
-  document.getElementById('brushctl').classList.toggle('hidden', !(t==='draw'||t==='erase'));
-  // the patch/single toggle only matters in Select mode.
-  document.getElementById('selctl').classList.toggle('hidden', t!=='select');
+  const bc=document.getElementById('brushctl');
+  bc.classList.toggle('hidden', !(t==='draw'||t==='erase'));
+  if(t==='draw'||t==='erase'){ const tb=document.getElementById('toolbar').getBoundingClientRect(); bc.style.top=(tb.bottom+6)+'px'; }
+  // the patch/single toggle only matters in Select mode. Position it just below the
+  // toolbar using its real height (font/zoom can make the toolbar taller than a magic px).
+  const sc=document.getElementById('selctl');
+  sc.classList.toggle('hidden', t!=='select');
+  if(t==='select'){ const tb=document.getElementById('toolbar').getBoundingClientRect(); sc.style.top=(tb.bottom+6)+'px'; }
   // in pan mode the map drags normally; editing tools capture the pointer.
   if(t==='pan'){ map.dragging.enable(); }
   // entering Select: remind that a tap grabs the whole patch, and how to pick one hex.
@@ -556,8 +561,8 @@ function modKeyLabel(){ return /Mac|iPhone|iPad/.test(navigator.platform||naviga
 // patch ↔ single-hex select toggle
 function setSelMode(single){
   selModeSingle=single;
-  document.getElementById('selModePatch').classList.toggle('primary', !single);
-  document.getElementById('selModeSingle').classList.toggle('primary', single);
+  document.getElementById('selModePatch').classList.toggle('on', !single);
+  document.getElementById('selModeSingle').classList.toggle('on', single);
 }
 document.getElementById('selModePatch').onclick=()=>setSelMode(false);
 document.getElementById('selModeSingle').onclick=()=>setSelMode(true);
