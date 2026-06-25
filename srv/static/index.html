@@ -24,14 +24,22 @@
 <div id="toolbar" class="panel">
   <button class="tool" data-tool="draw" title="Draw (assign use)"><span class="ic">✎</span><span class="lbl">Draw</span></button>
   <button class="tool" data-tool="erase" title="Rubber (clear use)"><span class="ic">⌫</span><span class="lbl">Rubber</span></button>
+  <button class="tool" data-tool="select" title="Select hexes"><span class="ic">⬡</span><span class="lbl">Select</span></button>
   <button class="tool" id="menuBtn" title="More"><span class="ic">⋯</span><span class="lbl">More</span></button>
+</div>
+
+<!-- Brush size (shown for Draw/Rubber) -->
+<div id="brushctl" class="panel hidden">
+  <span class="bz-lbl">Brush</span>
+  <button class="bz on" data-bz="1" title="Single hex"><span class="bz-dot" style="--d:9px"></span></button>
+  <button class="bz" data-bz="2" title="7 hexes"><span class="bz-dot" style="--d:15px"></span></button>
+  <button class="bz" data-bz="3" title="19 hexes"><span class="bz-dot" style="--d:21px"></span></button>
 </div>
 
 <!-- Status / selection bar -->
 <div id="statusbar" class="panel hidden">
   <span id="selCount">0 selected</span>
   <span class="sb-actions">
-    <button id="sbWildlife" class="chip-btn" title="Toggle wildlife range">＋Wildlife</button>
     <button id="sbGroup" class="chip-btn">Group</button>
     <button id="sbNote" class="chip-btn">Note</button>
     <button id="sbClear" class="chip-btn danger">Clear</button>

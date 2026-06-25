@@ -675,7 +675,8 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 func (s *Server) exportCSV(w http.ResponseWriter, cells map[string]cellState) {
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", "attachment; filename=\"landuse.csv\"")
-	fmt.Fprintln(w, "cell_id,land_use,wildlife,group,note")
+	centroids := s.cellCentroids() // id -> [lon,lat]
+	fmt.Fprintln(w, "cell_id,lat,lon,land_use,wildlife,group,note")
 	ids := make([]int, 0, len(cells))
 	for k := range cells {
 		n, _ := strconv.Atoi(k)
@@ -684,8 +685,35 @@ func (s *Server) exportCSV(w http.ResponseWriter, cells map[string]cellState) {
 	sort.Ints(ids)
 	for _, idn := range ids {
 		c := cells[strconv.Itoa(idn)]
-		fmt.Fprintf(w, "%d,%s,%d,%s,%s\n", idn, csvEsc(c.U), c.W, csvEsc(c.Grp), csvEsc(c.Nt))
+		var lat, lon string
+		if ct, ok := centroids[idn]; ok && len(ct) == 2 {
+			lon = strconv.FormatFloat(ct[0], 'f', 6, 64)
+			lat = strconv.FormatFloat(ct[1], 'f', 6, 64)
+		}
+		fmt.Fprintf(w, "%d,%s,%s,%s,%d,%s,%s\n", idn, lat, lon, csvEsc(c.U), c.W, csvEsc(c.Grp), csvEsc(c.Nt))
 	}
+}
+
+// cellCentroids loads each grid cell's centroid ([lon,lat]) from the static grid.
+func (s *Server) cellCentroids() map[int][]float64 {
+	out := map[int][]float64{}
+	gb, err := readFile(filepath.Join(s.StaticDir, "data", "grid.json"))
+	if err != nil {
+		return out
+	}
+	var grid struct {
+		Cells []struct {
+			ID int       `json:"id"`
+			Ct []float64 `json:"ct"`
+		} `json:"cells"`
+	}
+	if json.Unmarshal(gb, &grid) != nil {
+		return out
+	}
+	for _, c := range grid.Cells {
+		out[c.ID] = c.Ct
+	}
+	return out
 }
 
 func csvEsc(s string) string {
@@ -815,8 +843,25 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 func parseCSV(text string) map[string]cellState {
 	out := map[string]cellState{}
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	// Column mapping by header name (robust to extra/reordered cols like lat/lon).
+	// Falls back to legacy fixed order: cell_id,land_use,wildlife,group,note.
+	col := map[string]int{"cell_id": 0, "land_use": 1, "wildlife": 2, "group": 3, "note": 4}
+	hasHeader := false
+	if len(lines) > 0 && strings.Contains(strings.ToLower(lines[0]), "cell_id") {
+		hasHeader = true
+		for i, h := range splitCSVLine(lines[0]) {
+			col[strings.ToLower(strings.TrimSpace(h))] = i
+		}
+	}
+	get := func(f []string, name string) string {
+		idx, ok := col[name]
+		if !ok || idx < 0 || idx >= len(f) {
+			return ""
+		}
+		return f[idx]
+	}
 	for i, ln := range lines {
-		if i == 0 && strings.Contains(strings.ToLower(ln), "cell_id") {
+		if i == 0 && hasHeader {
 			continue
 		}
 		if strings.TrimSpace(ln) == "" {
@@ -826,22 +871,16 @@ func parseCSV(text string) map[string]cellState {
 		if len(f) < 2 {
 			continue
 		}
-		id, err := strconv.Atoi(strings.TrimSpace(f[0]))
+		id, err := strconv.Atoi(strings.TrimSpace(get(f, "cell_id")))
 		if err != nil {
 			continue
 		}
-		cs := cellState{U: strings.TrimSpace(f[1])}
-		if len(f) > 2 {
-			if n, _ := strconv.Atoi(strings.TrimSpace(f[2])); n == 1 {
-				cs.W = 1
-			}
+		cs := cellState{U: strings.TrimSpace(get(f, "land_use"))}
+		if n, _ := strconv.Atoi(strings.TrimSpace(get(f, "wildlife"))); n == 1 {
+			cs.W = 1
 		}
-		if len(f) > 3 {
-			cs.Grp = f[3]
-		}
-		if len(f) > 4 {
-			cs.Nt = f[4]
-		}
+		cs.Grp = get(f, "group")
+		cs.Nt = get(f, "note")
 		out[strconv.Itoa(id)] = cs
 	}
 	return out

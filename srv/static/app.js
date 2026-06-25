@@ -19,9 +19,25 @@ let cellById = new Map(); // id -> cell (with pre-split coords + bbox)
 let state = new Map();    // id -> {u,w,grp,nt}
 let rev = 0;
 let activeUse = 'grazing';
-let tool = 'draw';        // draw | erase
+let tool = 'draw';        // draw | erase | select
 let selection = new Set();// selected cell ids (for group/note/delete)
-let painting = false, paintErase = false, paintShift=false, lastPainted=null;
+let painting = false, paintSelect=false, lastPainted=null;
+let brushSize = 1;        // 1 = single hex, 2 = +ring, 3 = +2 rings
+let hoverId = null;       // cell under pointer (desktop brush preview)
+let dragMoved = false;    // pointer moved across cells since down
+let downCell = null;      // cell id where the current stroke started
+let selectAction = null;  // 'add' | 'remove' (consistent within a shift-drag)
+
+// adjacency + dissolved-outline machinery
+const adjacency = new Map();          // id -> [neighbour ids]
+let outlinesDirty = true;             // wildlife/group outlines need rebuild
+let selDirty = true;                  // selection outline needs rebuild
+const outlineCache = {wild:[], groups:[], sel:[]};
+let regionCache = {set:null, segs:null, use:null}; // contiguous same-use region (magic-wand / hover)
+function markDirty(){ outlinesDirty=true; regionCache.set=null; }
+
+// per-layer visibility (use ids + '__wild' for the wildlife-range overlay)
+const hiddenLayers = new Set();
 
 // ---------- map ----------
 const map = L.map('map', {zoomControl:false, attributionControl:false, preferCanvas:true,
@@ -58,43 +74,150 @@ function draw(){
   const b = map.getBounds().pad(0.1);
   const west=b.getWest(), east=b.getEast(), south=b.getSouth(), north=b.getNorth();
   const z = map.getZoom();
-  const showOutline = z>=8.5;
-  // first pass: filled uses
+  const inView=(c)=>!(c.maxx<west||c.minx>east||c.maxy<south||c.miny>north);
+
+  // pass 1: land-use fills. No per-cell boundaries (dissolved look); we stroke each
+  // hex in its own fill colour only to seal antialiasing hairlines between neighbours.
+  ctx.lineJoin='round';
   for(const c of grid.cells){
-    if(c.maxx<west||c.minx>east||c.maxy<south||c.miny>north) continue;
+    if(!inView(c)) continue;
     const st = state.get(c.id);
+    if(!(st && st.u)) continue;
+    if(hiddenLayers.has(st.u)) continue;
+    const col = USEMAP[st.u]? USEMAP[st.u].color : '#bbbbbb';
     const pts = projectCell(c);
-    if(st && st.u){
-      ctx.beginPath(); pathPts(pts);
-      ctx.fillStyle = USEMAP[st.u]? USEMAP[st.u].color : '#bbbbbb';
-      ctx.globalAlpha = 0.82; ctx.fill(); ctx.globalAlpha=1;
-    }
-    if(showOutline){
-      ctx.beginPath(); pathPts(pts);
-      ctx.lineWidth=0.5; ctx.strokeStyle='rgba(90,90,80,.25)'; ctx.stroke();
-    }
+    ctx.beginPath(); pathPts(pts);
+    ctx.globalAlpha = 0.82;
+    ctx.fillStyle = col; ctx.fill();
+    ctx.lineWidth = 0.9; ctx.strokeStyle = col; ctx.stroke();
+    ctx.globalAlpha = 1;
   }
-  // second pass: wildlife range overlay (inset dark outline) + group + selection
-  for(const c of grid.cells){
-    if(c.maxx<west||c.minx>east||c.maxy<south||c.miny>north) continue;
-    const st = state.get(c.id);
-    if(st && st.w){
-      const pts = projectCell(c, 0.72); // inset -> "second layer, slightly offset"
-      ctx.beginPath(); pathPts(pts);
-      ctx.lineWidth=1.6; ctx.strokeStyle='rgba(20,20,20,.9)'; ctx.stroke();
-    }
+
+  // very faint hex guide while actively editing & zoomed in (NOT a strong boundary)
+  if(z>=9.5 && (tool==='draw'||tool==='erase'||tool==='select')){
+    ctx.beginPath();
+    for(const c of grid.cells){ if(!inView(c)) continue; const pts=projectCell(c); pathPts(pts); }
+    ctx.lineWidth=0.5; ctx.strokeStyle='rgba(120,120,110,.10)'; ctx.stroke();
   }
-  // selection highlight
+
+  if(outlinesDirty) rebuildOutlines();
+
+  // pass 2: group outlines — grouped cells dissolve into one region (internal
+  // boundaries gone), drawn as a single dashed accent outline.
+  if(outlineCache.groups.length){
+    ctx.lineJoin='round'; ctx.lineCap='round'; ctx.setLineDash([5,4]);
+    ctx.lineWidth=3; ctx.strokeStyle='rgba(255,255,255,.65)';
+    for(const segs of outlineCache.groups) strokeSegs(segs,west,east,south,north);
+    ctx.lineWidth=1.7; ctx.strokeStyle='rgba(58,125,92,.95)';
+    for(const segs of outlineCache.groups) strokeSegs(segs,west,east,south,north);
+    ctx.setLineDash([]);
+  }
+
+  // pass 3: wildlife layer — the ONLY layer with strong, visible boundaries.
+  // Dissolved into merged regions with a bold dark outline (white halo for contrast).
+  if(outlineCache.wild.length && !hiddenLayers.has('__wild')){
+    ctx.lineJoin='round'; ctx.lineCap='round';
+    ctx.lineWidth=3.6; ctx.strokeStyle='rgba(255,255,255,.75)';
+    strokeSegs(outlineCache.wild,west,east,south,north);
+    ctx.lineWidth=2.1; ctx.strokeStyle='rgba(18,18,18,.94)';
+    strokeSegs(outlineCache.wild,west,east,south,north);
+  }
+
+  // pass 4: selection — translucent fill + single dissolved outline.
   if(selection.size){
+    if(selDirty){ outlineCache.sel=computeOutline(selection); selDirty=false; }
     for(const id of selection){
-      const c = cellById.get(id); if(!c) continue;
-      if(c.maxx<west||c.minx>east||c.maxy<south||c.miny>north) continue;
-      const pts = projectCell(c);
-      ctx.beginPath(); pathPts(pts);
-      ctx.fillStyle='rgba(58,125,92,.28)'; ctx.fill();
-      ctx.lineWidth=2; ctx.strokeStyle='#2c5e44'; ctx.stroke();
+      const c=cellById.get(id); if(!c||!inView(c)) continue;
+      const pts=projectCell(c); ctx.beginPath(); pathPts(pts);
+      ctx.fillStyle='rgba(58,125,92,.20)'; ctx.fill();
+    }
+    ctx.lineJoin='round'; ctx.lineCap='round';
+    ctx.lineWidth=2.4; ctx.strokeStyle='#2c5e44';
+    strokeSegs(outlineCache.sel,west,east,south,north);
+  }
+
+  // pass 5: brush / magic-wand hover preview (desktop)
+  if(hoverId!=null && !painting && (tool==='draw'||tool==='erase'||tool==='select')){
+    const pv = hoverPreview();
+    if(pv){
+      ctx.lineJoin='round'; ctx.lineCap='round'; ctx.setLineDash([4,3]);
+      ctx.lineWidth=2; ctx.strokeStyle = tool==='erase' ? 'rgba(178,59,59,.9)' : 'rgba(44,94,68,.95)';
+      strokeSegs(pv,west,east,south,north);
+      ctx.setLineDash([]);
     }
   }
+}
+
+// stroke a list of geo segments [lng1,lat1,lng2,lat2] in container pixels
+function strokeSegs(segs,west,east,south,north){
+  if(!segs||!segs.length) return;
+  ctx.beginPath();
+  for(const g of segs){
+    const x1=g[0],y1=g[1],x2=g[2],y2=g[3];
+    if((x1<west&&x2<west)||(x1>east&&x2>east)||(y1<south&&y2<south)||(y1>north&&y2>north)) continue;
+    const p1=map.latLngToContainerPoint([y1,x1]);
+    const p2=map.latLngToContainerPoint([y2,x2]);
+    ctx.moveTo(p1.x,p1.y); ctx.lineTo(p2.x,p2.y);
+  }
+  ctx.stroke();
+}
+
+// boundary edges of a set of cells (edges belonging to exactly one member)
+function vkey(p){ return Math.round(p[0]*1e6)+','+Math.round(p[1]*1e6); }
+function ekey(a,b){ const ka=vkey(a),kb=vkey(b); return ka<kb? ka+'|'+kb : kb+'|'+ka; }
+function computeOutline(ids){
+  const set = ids instanceof Set ? ids : new Set(ids);
+  const cnt=new Map(), geo=new Map();
+  for(const id of set){
+    const c=cellById.get(id); if(!c) continue;
+    const g=c.g, n=g.length;
+    for(let i=0;i<n;i++){
+      const a=g[i], bb=g[(i+1)%n], k=ekey(a,bb);
+      cnt.set(k,(cnt.get(k)||0)+1);
+      if(!geo.has(k)) geo.set(k,[a[0],a[1],bb[0],bb[1]]);
+    }
+  }
+  const segs=[];
+  for(const [k,c] of cnt){ if(c===1) segs.push(geo.get(k)); }
+  return segs;
+}
+function rebuildOutlines(){
+  const wild=[]; const groups=new Map();
+  for(const [id,st] of state){
+    if(st.w) wild.push(id);
+    if(st.grp){ let a=groups.get(st.grp); if(!a){a=[];groups.set(st.grp,a);} a.push(id); }
+  }
+  outlineCache.wild = computeOutline(wild);
+  outlineCache.groups = [];
+  for(const ids of groups.values()) outlineCache.groups.push(computeOutline(ids));
+  outlinesDirty=false;
+}
+
+// neighbours within (size-1) hex rings of a centre cell
+function brushCells(centerId, size){
+  if(size<=1) return [centerId];
+  const seen=new Set([centerId]); let frontier=[centerId];
+  for(let d=1; d<size; d++){
+    const next=[];
+    for(const id of frontier) for(const nb of (adjacency.get(id)||[])) if(!seen.has(nb)){ seen.add(nb); next.push(nb); }
+    frontier=next;
+  }
+  return [...seen];
+}
+// contiguous patch of cells sharing the same land use as the seed (cached)
+function contiguousRegion(id){
+  if(regionCache.set && regionCache.set.has(id)) return regionCache;
+  const u=(state.get(id)||{}).u||''; const seen=new Set([id]); const q=[id]; let cap=6000;
+  while(q.length && cap-->0){ const x=q.pop();
+    for(const nb of (adjacency.get(x)||[])){ if(seen.has(nb)) continue;
+      if(((state.get(nb)||{}).u||'')===u){ seen.add(nb); q.push(nb); } } }
+  regionCache={set:seen, segs:computeOutline(seen), use:u};
+  return regionCache;
+}
+function hoverPreview(){
+  if(hoverId==null) return null;
+  if(tool==='select' && brushSize===1) return contiguousRegion(hoverId).segs;
+  return computeOutline(brushCells(hoverId, brushSize));
 }
 
 function pathPts(pts){
@@ -128,6 +251,20 @@ function cellAt(latlng){
   }
   return null;
 }
+// nearest cell by centroid — lets you draw "anywhere", even outside/between hexes
+let nearestScale=null;
+function nearestCell(latlng){
+  const x=latlng.lng, y=latlng.lat;
+  if(nearestScale==null){ const la=(grid.bounds[1]+grid.bounds[3])/2; nearestScale=Math.cos(la*Math.PI/180); }
+  let best=null, bd=Infinity;
+  for(const c of grid.cells){
+    const dx=(c.ct[0]-x)*nearestScale, dy=c.ct[1]-y; const d=dx*dx+dy*dy;
+    if(d<bd){ bd=d; best=c; }
+  }
+  return best;
+}
+// cell under the pointer, snapping to the nearest one if the point misses every hex
+function pickCell(latlng){ return cellAt(latlng) || nearestCell(latlng); }
 function pointInRing(x,y,ring){
   let inside=false;
   for(let i=0,j=ring.length-1;i<ring.length;j=i++){
@@ -148,21 +285,26 @@ function eventLatLng(e){
 let pendingOps = [];   // queued cell ids per op for batching
 let opAccum = {};      // op -> Set ids
 
-function applyToCell(c, shift){
+function applyToCell(c, isSelect, first){
   if(!c) return;
-  if(shift || tool==='select'){
-    // toggle selection only
-    if(selection.has(c.id)) selection.delete(c.id); else selection.add(c.id);
-    updateStatusbar(); scheduleDraw(); return;
+  if(isSelect || tool==='select'){
+    // magic-wand: a single tap (brush=1, not dragged) grabs the whole same-use patch;
+    // dragging switches to plain per-hex lasso selection.
+    const ids = (first && brushSize===1)
+      ? [...contiguousRegion(c.id).set]
+      : brushCells(c.id, brushSize);
+    // first cell of a drag decides whether we're adding or removing
+    if(selectAction==null) selectAction = selection.has(c.id) ? 'remove' : 'add';
+    for(const id of ids){ if(selectAction==='add') selection.add(id); else selection.delete(id); }
+    selDirty=true; updateStatusbar(); scheduleDraw(); return;
   }
+  const ids = brushCells(c.id, brushSize);
   if(tool==='draw'){
-    setLocal(c.id,{u:activeUse});
-    selection.add(c.id);
-    queueOp('setUse', c.id, activeUse);
+    for(const id of ids){ setLocal(id,{u:activeUse}); selection.add(id); queueOp('setUse', id, activeUse); }
+    selDirty=true;
   } else if(tool==='erase'){
-    setLocal(c.id,{u:''});
-    selection.delete(c.id);
-    queueOp('clearUse', c.id, '');
+    for(const id of ids){ setLocal(id,{u:''}); selection.delete(id); queueOp('clearUse', id, ''); }
+    selDirty=true;
   }
   updateStatusbar(); scheduleDraw();
 }
@@ -176,6 +318,7 @@ function setLocal(id, patch){
   if(nx.grp==='') delete nx.grp;
   if(nx.nt==='') delete nx.nt;
   if(Object.keys(nx).length===0) state.delete(id); else state.set(id,nx);
+  markDirty();
 }
 
 // batch ops to the server
@@ -206,27 +349,39 @@ async function flushOps(){
 // pointer events
 function onDown(e){
   if(!grid||!me||!me.authed) return;
-  const shift = e.shiftKey;
-  const c = cellAt(eventLatLng(e));
+  const isSelect = e.shiftKey || tool==='select';
+  const c = pickCell(eventLatLng(e));
   if(!c){ return; }
-  // prevent map drag while painting
-  painting=true; paintShift=shift; lastPainted=c.id;
+  painting=true; paintSelect=isSelect; lastPainted=c.id; downCell=c.id; dragMoved=false;
+  selectAction=null;
   map.dragging.disable();
   e.preventDefault();
-  applyToCell(c, shift);
+  applyToCell(c, isSelect, true);
 }
 function onMove(e){
   if(!painting) return;
-  const c = cellAt(eventLatLng(e));
-  if(c && c.id!==lastPainted){ lastPainted=c.id; applyToCell(c, paintShift); }
+  const c = pickCell(eventLatLng(e));
+  if(c && c.id!==lastPainted){
+    lastPainted=c.id; dragMoved=true;
+    applyToCell(c, paintSelect, false);
+  }
 }
 function onUp(){
-  if(painting){ painting=false; map.dragging.enable(); flushOps(); renderLegend(); }
+  if(painting){ painting=false; map.dragging.enable(); selectAction=null; flushOps(); renderLegend(); }
+}
+// desktop hover preview for brush / magic-wand
+function onHover(e){
+  if(painting || !grid || !me || !me.authed) return;
+  if(!(tool==='draw'||tool==='erase'||tool==='select')){ if(hoverId!=null){hoverId=null;scheduleDraw();} return; }
+  const c = pickCell(eventLatLng(e));
+  const id = c? c.id : null;
+  if(id!==hoverId){ hoverId=id; scheduleDraw(); }
 }
 
 mapEl.addEventListener('mousedown', e=>{ if(e.button===0) onDown(e); });
-window.addEventListener('mousemove', onMove);
+window.addEventListener('mousemove', e=>{ onMove(e); onHover(e); });
 window.addEventListener('mouseup', onUp);
+mapEl.addEventListener('mouseleave', ()=>{ if(hoverId!=null){ hoverId=null; scheduleDraw(); } });
 mapEl.addEventListener('touchstart', e=>{ if(e.touches.length===1) onDown(e); }, {passive:false});
 mapEl.addEventListener('touchmove', e=>{ if(painting){ e.preventDefault(); onMove(e); } }, {passive:false});
 window.addEventListener('touchend', onUp);
@@ -236,18 +391,27 @@ function renderLegend(){
   const body=document.getElementById('legendBody'); body.innerHTML='';
   const counts={}; let wild=0;
   for(const st of state.values()){ if(st.u) counts[st.u]=(counts[st.u]||0)+1; if(st.w) wild++; }
-  for(const u of USES){
-    const row=document.createElement('div'); row.className='legend-row'+(u.id===activeUse?' active':'');
-    row.innerHTML=`<span class="sw" style="background:${u.color}"></span>
-      <span class="nm">${u.label}</span><span class="ct">${counts[u.id]||0}</span>`;
-    row.onclick=()=>{ activeUse=u.id; if(tool==='erase') setTool('draw'); renderLegend();
-      if(selection.size){ recolorSelection(u.id); } };
+  const mkRow=(id,label,swHTML,count,onPick)=>{
+    const hidden=hiddenLayers.has(id);
+    const row=document.createElement('div');
+    row.className='legend-row'+(id===activeUse?' active':'')+(hidden?' hidden-layer':'');
+    row.innerHTML=`<button class="eye" title="${hidden?'Show':'Hide'} layer">${hidden?'\u2298':'\u25c9'}</button>
+      ${swHTML}<span class="nm">${label}</span><span class="ct">${count}</span>`;
+    row.querySelector('.eye').onclick=(e)=>{ e.stopPropagation();
+      if(hidden) hiddenLayers.delete(id); else hiddenLayers.add(id);
+      renderLegend(); scheduleDraw(); };
+    row.onclick=onPick;
     body.appendChild(row);
+  };
+  for(const u of USES){
+    mkRow(u.id, u.label, `<span class="sw" style="background:${u.color}"></span>`, counts[u.id]||0,
+      ()=>{ activeUse=u.id; if(tool==='erase') setTool('draw'); renderLegend();
+        if(selection.size) recolorSelection(u.id); });
   }
-  const wrow=document.createElement('div'); wrow.className='legend-row';
-  wrow.innerHTML=`<span class="sw wild"></span><span class="nm">Wildlife range</span><span class="ct">${wild}</span>`;
-  wrow.onclick=()=>{ if(selection.size) toggleWildlifeSelection(); };
-  body.appendChild(wrow);
+  // Wildlife range — separate overlay layer. Tapping it (with a selection) toggles
+  // wildlife on those cells; the eye hides/shows the layer.
+  mkRow('__wild', 'Wildlife range', `<span class="sw wild"></span>`, wild,
+    ()=>{ if(selection.size) toggleWildlifeSelection(); else toast('Select hexes, then tap to toggle wildlife'); });
 }
 document.getElementById('legendToggle').onclick=()=>{
   document.getElementById('legend').classList.toggle('collapsed');
@@ -257,11 +421,22 @@ document.getElementById('legendToggle').onclick=()=>{
 function setTool(t){
   tool=t;
   document.querySelectorAll('.tool').forEach(b=>b.classList.toggle('active', b.dataset.tool===t));
-  mapEl.classList.remove('tool-draw','tool-erase');
-  if(t==='draw'||t==='erase') mapEl.classList.add('tool-'+t);
+  mapEl.classList.remove('tool-draw','tool-erase','tool-select');
+  if(t==='draw'||t==='erase'||t==='select') mapEl.classList.add('tool-'+t);
+  // brush control is relevant to all three editing tools
+  document.getElementById('brushctl').classList.toggle('hidden', !(t==='draw'||t==='erase'||t==='select'));
+  hoverId=null; scheduleDraw();
 }
 document.querySelectorAll('.tool[data-tool]').forEach(b=>{
   b.onclick=()=>setTool(b.dataset.tool);
+});
+// brush size buttons
+document.querySelectorAll('.bz[data-bz]').forEach(b=>{
+  b.onclick=()=>{
+    brushSize=Number(b.dataset.bz);
+    document.querySelectorAll('.bz').forEach(x=>x.classList.toggle('on', x===b));
+    scheduleDraw();
+  };
 });
 document.getElementById('menuBtn').onclick=openMenu;
 document.getElementById('accountBtn').onclick=openMenu;
@@ -273,18 +448,14 @@ function updateStatusbar(){
   if(n===0){ sb.classList.add('hidden'); return; }
   sb.classList.remove('hidden');
   document.getElementById('selCount').textContent = n+' cell'+(n>1?'s':'')+' selected';
-  // wildlife toggle state
-  let allWild=true; for(const id of selection){ if(!(state.get(id)||{}).w){ allWild=false; break; } }
-  document.getElementById('sbWildlife').classList.toggle('on', allWild);
 }
-document.getElementById('sbDone').onclick=()=>{ selection.clear(); updateStatusbar(); scheduleDraw(); };
+document.getElementById('sbDone').onclick=()=>{ selection.clear(); selDirty=true; updateStatusbar(); scheduleDraw(); };
 document.getElementById('sbClear').onclick=()=>{
   const ids=[...selection];
   ids.forEach(id=>setLocal(id,{u:''}));
   api('/api/update','POST',{op:'clearUse', ids}).then(r=>{rev=r.rev;});
   renderLegend(); scheduleDraw();
 };
-document.getElementById('sbWildlife').onclick=()=>toggleWildlifeSelection();
 document.getElementById('sbGroup').onclick=()=>groupSheet();
 document.getElementById('sbNote').onclick=()=>noteSheet();
 
@@ -386,10 +557,11 @@ function helpSheet(){
   openSheet(`<h2>How it works</h2>
     <p class="sub">Everything is the map.</p>
     <div class="hint">
-      <b>Draw</b> — pick a use in the legend, then tap or drag across hexes to assign it.<br><br>
+      <b>Draw</b> — pick a use in the legend, then tap or drag to paint hexes. You can draw <i>anywhere</i> on the map — it snaps to the nearest hex.<br><br>
       <b>Rubber</b> — tap or drag to clear a hex's use.<br><br>
-      <b>Select</b> — Shift-click (or shift-drag) hexes to select them without painting. Then group, annotate, add a wildlife range, recolour (tap a legend swatch) or clear them from the bar at the bottom.<br><br>
-      <b>Wildlife range</b> sits as a second layer (dark outline) and can overlap any land use.<br><br>
+      <b>Brush size</b> — the dots next to the tools paint 1, 7, or 19 hexes at once.<br><br>
+      <b>Select</b> — tap a hex to grab its whole same-colour patch (magic wand), or drag to lasso. Shift-click works in any tool. Then group, annotate, recolour (tap a legend swatch) or clear them from the bottom bar.<br><br>
+      <b>Layers</b> — tap the ◉ eye in the legend to hide/show a layer. <b>Wildlife range</b> is a separate overlay (the only layer with a bold outline) — select hexes then tap it in the legend to toggle. Grouped or wildlife cells <b>dissolve</b> into one region.<br><br>
       Each hex ≈ <b>10&nbsp;km²</b>. Changes save automatically and everyone with the secret edits the same map.
     </div>
     <div class="row end"><button class="btn primary" onclick="this.closest('.sheet').classList.add('hidden');document.getElementById('sheetOverlay').classList.add('hidden')">Got it</button></div>`);
@@ -435,11 +607,11 @@ function importSheet(){
     <label>Mode</label>
     <select id="impMode"><option value="replace">Replace whole map</option><option value="merge">Merge into current</option></select>
     <label>Paste CSV or GeoJSON <span style="font-weight:400">(GeoJSON opens straight into QGIS → save as .gpkg)</span></label>
-    <textarea id="impText" placeholder="cell_id,land_use,wildlife,group,note&#10;1,grazing,0,,"></textarea>
+    <textarea id="impText" placeholder="cell_id,lat,lon,land_use,wildlife,group,note&#10;1,7.90,31.85,grazing,0,,"></textarea>
     <label>…or choose a file</label>
     <input type="file" id="impFile" accept=".csv,.geojson,.json">
     <div class="row end"><button class="btn primary" id="impGo">Import</button></div>
-    <div class="hint">CSV columns: cell_id, land_use, wildlife (0/1), group, note. GeoJSON features need a <code>cell_id</code> property.</div>`);
+    <div class="hint">CSV columns are matched by header name: cell_id, land_use, wildlife (0/1), group, note. The exported lat/lon columns are ignored on import. GeoJSON features need a <code>cell_id</code> property.</div>`);
   document.getElementById('impFile').onchange=e=>{
     const f=e.target.files[0]; if(!f) return;
     const rd=new FileReader(); rd.onload=()=>{ document.getElementById('impText').value=rd.result; }; rd.readAsText(f);
@@ -515,6 +687,7 @@ function applyServerState(r){
     state.clear();
     for(const [id,st] of Object.entries(r.cells)) state.set(Number(id), normSt(st));
   }
+  markDirty(); selDirty=true;
   renderLegend(); updateStatusbar(); scheduleDraw();
 }
 function normSt(st){ const o={}; if(st.u)o.u=st.u; if(st.w)o.w=1; if(st.grp)o.grp=st.grp; if(st.nt)o.nt=st.nt; return o; }
@@ -527,8 +700,23 @@ async function loadGrid(){
     c.minx=minx;c.miny=miny;c.maxx=maxx;c.maxy=maxy;
     cellById.set(c.id,c);
   }
+  buildAdjacency();
   const bb=grid.bounds; // [w,s,e,n]
   map.fitBounds([[bb[1],bb[0]],[bb[3],bb[2]]], {padding:[20,20]});
+}
+
+// build hex adjacency from shared edges (vertices are exact across neighbours)
+function buildAdjacency(){
+  const edge=new Map(); // ekey -> [id,...]
+  for(const c of grid.cells){
+    const g=c.g, n=g.length;
+    for(let i=0;i<n;i++){ const k=ekey(g[i],g[(i+1)%n]);
+      let a=edge.get(k); if(!a){a=[];edge.set(k,a);} a.push(c.id); }
+  }
+  for(const c of grid.cells) adjacency.set(c.id,[]);
+  for(const ids of edge.values()){
+    if(ids.length===2){ adjacency.get(ids[0]).push(ids[1]); adjacency.get(ids[1]).push(ids[0]); }
+  }
 }
 
 async function boot(){
