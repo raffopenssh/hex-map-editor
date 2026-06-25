@@ -366,7 +366,7 @@ function openMenu(){
     <div class="row">
       <button class="btn ghost" id="mImport">Import…</button>
       <button class="btn ghost" id="mExportCsv">Export CSV</button>
-      <button class="btn ghost" id="mExportGeo">Export GPKG/GeoJSON</button>
+      <button class="btn ghost" id="mExportGeo">Export GeoJSON</button>
     </div>
     <div class="row">
       <button class="btn ghost" id="mHelp">How it works</button>
@@ -434,7 +434,7 @@ function importSheet(){
   openSheet(`<h2>Import</h2><p class="sub">Load a hive CSV or GeoJSON of cell assignments.</p>
     <label>Mode</label>
     <select id="impMode"><option value="replace">Replace whole map</option><option value="merge">Merge into current</option></select>
-    <label>Paste CSV or GeoJSON</label>
+    <label>Paste CSV or GeoJSON <span style="font-weight:400">(GeoJSON opens straight into QGIS → save as .gpkg)</span></label>
     <textarea id="impText" placeholder="cell_id,land_use,wildlife,group,note&#10;1,grazing,0,,"></textarea>
     <label>…or choose a file</label>
     <input type="file" id="impFile" accept=".csv,.geojson,.json">
