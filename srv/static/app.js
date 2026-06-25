@@ -117,10 +117,12 @@ function draw(){
   // pass 2: group outlines — grouped cells dissolve into one region (internal
   // boundaries gone), drawn as a single dashed accent outline.
   if(outlineCache.groups.length){
-    ctx.lineJoin='round'; ctx.lineCap='round'; ctx.setLineDash([5,4]);
-    ctx.lineWidth=3; ctx.strokeStyle='rgba(255,255,255,.65)';
+    // only the OUTER boundary of each group is traced (computeOutline dissolves
+    // shared inner edges); keep it subtle.
+    ctx.lineJoin='round'; ctx.lineCap='round'; ctx.setLineDash([3,4]);
+    ctx.lineWidth=2; ctx.strokeStyle='rgba(255,255,255,.45)';
     for(const segs of outlineCache.groups) strokeSegs(segs,west,east,south,north);
-    ctx.lineWidth=1.7; ctx.strokeStyle='rgba(58,125,92,.95)';
+    ctx.lineWidth=1; ctx.strokeStyle='rgba(58,125,92,.55)';
     for(const segs of outlineCache.groups) strokeSegs(segs,west,east,south,north);
     ctx.setLineDash([]);
   }
@@ -337,9 +339,11 @@ function applyToCell(c, isSelect, first){
       if(selection.has(c.id)){ selection.delete(c.id); selDirty=true; updateStatusbar(); scheduleDraw(); }
       return;
     }
-    // magic-wand: a single tap (brush=1, not dragged) grabs the whole same-use patch;
+    // magic-wand: a single tap (brush=1, not dragged) grabs the whole same-use patch.
+    // BUT a grouped hex is picked individually, so you can ungroup hexes one by one.
     // dragging switches to plain per-hex lasso selection.
-    const raw = (first && brushSize===1)
+    const grouped = !!(state.get(c.id)||{}).grp;
+    const raw = (first && brushSize===1 && !grouped)
       ? [...contiguousRegion(c.id).set]
       : brushCells(c.id, brushSize);
     const ids = raw.filter(cellVisible); // never pull in hidden cells
