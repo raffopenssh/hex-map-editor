@@ -39,6 +39,10 @@ function markDirty(){ outlinesDirty=true; regionCache.set=null; }
 // per-layer visibility (use ids + '__wild' for the wildlife-range overlay)
 const hiddenLayers = new Set();
 
+// geolocation: subtly flash the hex the user is standing in
+let geoOn = false, geoWatchId = null, geoCellId = null, geoLatLng = null;
+let geoAnimating = false;
+
 // ---------- map ----------
 const map = L.map('map', {zoomControl:false, attributionControl:false, preferCanvas:true,
   minZoom:6, maxZoom:13, zoomSnap:0.5, wheelPxPerZoomLevel:120});
@@ -146,6 +150,28 @@ function draw(){
       ctx.setLineDash([]);
     }
   }
+
+  // pass 6: "you are here" — subtly flash the outline of the hex you're standing in
+  if(geoOn && geoCellId!=null){
+    const c = cellById.get(geoCellId);
+    if(c && inView(c)){
+      const t = (Math.sin(performance.now()/650)+1)/2; // 0..1 slow pulse
+      const pts = projectCell(c);
+      ctx.lineJoin='round';
+      ctx.beginPath(); pathPts(pts);
+      ctx.lineWidth = 2 + t*2.5;
+      ctx.strokeStyle = `rgba(58,125,92,${0.35 + t*0.55})`;
+      ctx.stroke();
+    }
+  }
+}
+
+// drive a gentle continuous redraw while location is shown (for the pulse)
+function geoPulseLoop(){
+  if(!(geoOn && geoCellId!=null)){ geoAnimating=false; return; }
+  geoAnimating=true;
+  scheduleDraw();
+  requestAnimationFrame(geoPulseLoop);
 }
 
 // stroke a list of geo segments [lng1,lat1,lng2,lat2] in container pixels
@@ -441,6 +467,46 @@ document.querySelectorAll('.bz[data-bz]').forEach(b=>{
 document.getElementById('menuBtn').onclick=openMenu;
 document.getElementById('accountBtn').onclick=openMenu;
 
+// ---------- geolocation ("you are here") ----------
+const geoBtn=document.getElementById('geoBtn');
+if(!('geolocation' in navigator)) geoBtn.style.display='none';
+geoBtn.onclick=()=>{ geoOn ? stopGeo() : startGeo(); };
+function startGeo(){
+  if(!('geolocation' in navigator)){ toast('Location not available'); return; }
+  geoBtn.classList.add('locating');
+  geoWatchId = navigator.geolocation.watchPosition(onGeo, onGeoErr,
+    {enableHighAccuracy:true, maximumAge:10000, timeout:15000});
+}
+function stopGeo(){
+  if(geoWatchId!=null){ navigator.geolocation.clearWatch(geoWatchId); geoWatchId=null; }
+  geoOn=false; geoCellId=null; geoLatLng=null;
+  geoBtn.classList.remove('on','locating');
+  geoBtn.title='Show my location';
+  scheduleDraw();
+}
+function onGeo(pos){
+  const {latitude:lat, longitude:lng} = pos.coords;
+  geoLatLng = [lat,lng];
+  const c = cellAt(L.latLng(lat,lng));
+  geoCellId = c ? c.id : null;
+  const first = !geoOn;
+  geoOn = true;
+  geoBtn.classList.remove('locating'); geoBtn.classList.add('on');
+  if(first){
+    geoBtn.title = 'Hide my location';
+    if(c) map.setView([lat,lng], Math.max(map.getZoom(), 10), {animate:true});
+    else toast('You are outside the mapped area');
+  }
+  if(!geoAnimating) geoPulseLoop();
+  scheduleDraw();
+}
+function onGeoErr(err){
+  geoBtn.classList.remove('locating','on'); geoOn=false;
+  toast(err && err.code===1 ? 'Location permission denied' : 'Could not get location');
+}
+// keep the highlighted hex in sync as the map / data moves
+map.on('zoomend', ()=>{ if(geoOn && geoLatLng){ const c=cellAt(L.latLng(geoLatLng[0],geoLatLng[1])); geoCellId=c?c.id:null; } });
+
 // ---------- status bar (selection actions) ----------
 function updateStatusbar(){
   const sb=document.getElementById('statusbar');
@@ -561,6 +627,7 @@ function helpSheet(){
       <b>Rubber</b> — tap or drag to clear a hex's use.<br><br>
       <b>Brush size</b> — the dots next to the tools paint 1, 7, or 19 hexes at once.<br><br>
       <b>Select</b> — tap a hex to grab its whole same-colour patch (magic wand), or drag to lasso. Shift-click works in any tool. Then group, annotate, recolour (tap a legend swatch) or clear them from the bottom bar.<br><br>
+      <b>Find me</b> — the ◉ button top-right asks for your location and gently flashes the hex you're standing in.<br><br>
       <b>Layers</b> — tap the ◉ eye in the legend to hide/show a layer. <b>Wildlife range</b> is a separate overlay (the only layer with a bold outline) — select hexes then tap it in the legend to toggle. Grouped or wildlife cells <b>dissolve</b> into one region.<br><br>
       Each hex ≈ <b>10&nbsp;km²</b>. Changes save automatically and everyone with the secret edits the same map.
     </div>
