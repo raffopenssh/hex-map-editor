@@ -38,8 +38,9 @@ html,body{margin:0;height:100%;font-family:-apple-system,BlinkMacSystemFont,"Seg
 .tool.active .lbl,.tool.active .ic{color:#fff}
 
 /* brush size control */
-#brushctl{left:12px;top:66px;display:flex;align-items:center;gap:6px;padding:5px 8px}
-#brushctl .bz-lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:600}
+#brushctl,#selctl{left:12px;top:66px;display:flex;align-items:center;gap:6px;padding:5px 8px}
+#brushctl .bz-lbl,#selctl .bz-lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:600}
+#selctl .chip-btn{padding:5px 10px;font-size:12.5px}
 .bz{display:flex;align-items:center;justify-content:center;width:34px;height:34px;border:1px solid var(--line);background:#fff;border-radius:9px;cursor:pointer;color:#b9bdb6;padding:0}
 .bz .bz-dot{display:inline-block;width:var(--d);height:var(--d);border-radius:50%;background:currentColor}
 .bz:hover{background:#f3f2ec}
@@ -133,7 +134,7 @@ body.global-mode #geoBtn{display:none!important}
   #legend{max-width:46vw;font-size:12px}
   .tool .lbl{display:none}
   .tool{min-width:42px;padding:9px}
-  #brushctl{top:60px}
-  #brushctl .bz-lbl{display:none}
+  #brushctl,#selctl{top:60px}
+  #brushctl .bz-lbl,#selctl .bz-lbl{display:none}
   #statusbar{width:calc(100vw - 24px);justify-content:space-between}
 }

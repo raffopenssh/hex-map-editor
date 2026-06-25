@@ -27,6 +27,8 @@ let hoverId = null;       // cell under pointer (desktop brush preview)
 let dragMoved = false;    // pointer moved across cells since down
 let downCell = null;      // cell id where the current stroke started
 let selectAction = null;  // 'add' | 'remove' (consistent within a shift-drag)
+let selSingle = false;    // this stroke picks one hex, not the magic-wand patch
+let selModeSingle = false;// persistent toggle (mobile-friendly) for single-hex select
 
 // adjacency + dissolved-outline machinery
 const adjacency = new Map();          // id -> [neighbour ids]
@@ -341,9 +343,10 @@ function applyToCell(c, isSelect, first){
     }
     // magic-wand: a single tap (brush=1, not dragged) grabs the whole same-use patch.
     // BUT a grouped hex is picked individually, so you can ungroup hexes one by one.
+    // Holding ⌘/Ctrl (selSingle) overrides the wand and picks just the one hex.
     // dragging switches to plain per-hex lasso selection.
     const grouped = !!(state.get(c.id)||{}).grp;
-    const raw = (first && brushSize===1 && !grouped)
+    const raw = (first && brushSize===1 && !grouped && !selSingle)
       ? [...contiguousRegion(c.id).set]
       : brushCells(c.id, brushSize);
     const ids = raw.filter(cellVisible); // never pull in hidden cells
@@ -406,6 +409,8 @@ function onDown(e){
   // Pan tool: leave the gesture to Leaflet so the map moves. Shift still selects.
   if(tool==='pan' && !e.shiftKey) return;
   const isSelect = e.shiftKey || tool==='select';
+  // Single-hex select if the persistent toggle is on, OR ⌘/Ctrl is held this stroke.
+  selSingle = selModeSingle || !!(e.metaKey || e.ctrlKey);
   const c = pickCell(eventLatLng(e));
   if(!c){ return; }
   painting=true; paintSelect=isSelect; lastPainted=c.id; downCell=c.id; dragMoved=false;
@@ -538,10 +543,24 @@ function setTool(t){
   mapEl.classList.add('tool-'+t);
   // brush only matters when painting (draw / erase); it auto appears/disappears.
   document.getElementById('brushctl').classList.toggle('hidden', !(t==='draw'||t==='erase'));
+  // the patch/single toggle only matters in Select mode.
+  document.getElementById('selctl').classList.toggle('hidden', t!=='select');
   // in pan mode the map drags normally; editing tools capture the pointer.
   if(t==='pan'){ map.dragging.enable(); }
+  // entering Select: remind that a tap grabs the whole patch, and how to pick one hex.
+  if(t==='select') toast('Tap grabs the whole patch · use the Single-hex toggle (or hold '+modKeyLabel()+') to pick one');
   hoverId=null; hideHovertip(); scheduleDraw();
 }
+// ⌘ on mac/touch-mac, Ctrl elsewhere
+function modKeyLabel(){ return /Mac|iPhone|iPad/.test(navigator.platform||navigator.userAgent) ? '⌘' : 'Ctrl'; }
+// patch ↔ single-hex select toggle
+function setSelMode(single){
+  selModeSingle=single;
+  document.getElementById('selModePatch').classList.toggle('primary', !single);
+  document.getElementById('selModeSingle').classList.toggle('primary', single);
+}
+document.getElementById('selModePatch').onclick=()=>setSelMode(false);
+document.getElementById('selModeSingle').onclick=()=>setSelMode(true);
 document.querySelectorAll('.tool[data-tool]').forEach(b=>{
   b.onclick=()=>setTool(b.dataset.tool);
 });
@@ -742,7 +761,7 @@ function helpSheet(){
       <b>Rubber</b> — tap or drag to clear a hex's use.<br><br>
       <b>Brush size</b> — the dots next to the tools paint 1, 7, or 19 hexes at once.<br><br>
       <b>Pan</b> — the ✋ tool moves the map around without editing. (You can also pan in any tool by dragging on empty space, and shift-drag selects.)<br><br>
-      <b>Select</b> — tap a hex to grab its whole same-colour patch (magic wand), or drag to lasso. Shift-click works in any tool. Then group, annotate, recolour (tap a legend swatch), <b>Clear use</b>, <b>Delete</b> (wipe everything), or <b>Ungroup</b> from the bottom bar.<br><br>
+      <b>Select</b> — tap a hex to grab its whole same-colour patch (magic wand), or drag to lasso. Switch the <b>Patch / Single hex</b> toggle (or hold <b>⌘/Ctrl</b>) to pick just one hex instead. Shift-click works in any tool. Then group, annotate, recolour (tap a legend swatch), <b>Clear use</b>, <b>Delete</b> (wipe everything), or <b>Ungroup</b> from the bottom bar.<br><br>
       <b>Hover</b> — point at a hex to see its land use, area (ha), group, and notes.<br><br>
       <b>Find me</b> — the ◉ button top-right asks for your location and gently flashes the hex you're standing in.<br><br>
       <b>Layers</b> — tap the ◉ eye in the legend to hide/show a layer. <b>Wildlife range</b> is a separate overlay (the only layer with a bold outline) — select hexes then tap it in the legend to toggle. Grouped or wildlife cells <b>dissolve</b> into one region.<br><br>

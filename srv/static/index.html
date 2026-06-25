@@ -37,6 +37,13 @@
   <button class="bz" data-bz="3" title="19 hexes"><span class="bz-dot" style="--d:21px"></span></button>
 </div>
 
+<!-- Select-mode control: magic-wand patch vs single hex -->
+<div id="selctl" class="panel hidden">
+  <span class="bz-lbl">Select</span>
+  <button id="selModePatch" class="chip-btn primary" title="Tap grabs the whole same-colour patch">Patch</button>
+  <button id="selModeSingle" class="chip-btn" title="Tap selects one hex (or hold ⌘/Ctrl)">Single hex</button>
+</div>
+
 <!-- Status / selection bar -->
 <div id="statusbar" class="panel hidden">
   <span id="selCount">0 selected</span>
