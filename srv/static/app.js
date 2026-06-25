@@ -737,7 +737,7 @@ function openMenu(){
     <div class="row">
       <button class="btn ghost" id="mImport">Import…</button>
       <button class="btn ghost" id="mExportCsv">Export CSV</button>
-      <button class="btn ghost" id="mExportGeo">Export GeoJSON</button>
+      <button class="btn ghost" id="mExportGpkg">Export GeoPackage</button>
     </div>
     <div class="row">
       <button class="btn ghost" id="mHelp">How it works</button>
@@ -746,7 +746,7 @@ function openMenu(){
   document.getElementById('mVersions').onclick=versionsSheet;
   document.getElementById('mImport').onclick=importSheet;
   document.getElementById('mExportCsv').onclick=()=>{ window.location='/api/export?fmt=csv'; };
-  document.getElementById('mExportGeo').onclick=()=>{ window.location='/api/export?fmt=geojson'; };
+  document.getElementById('mExportGpkg').onclick=()=>{ window.location='/api/export?fmt=gpkg'; };
   document.getElementById('mHelp').onclick=helpSheet;
   document.getElementById('mLogout').onclick=doLogout;
 }
@@ -820,27 +820,45 @@ async function loadVersions(){
 }
 
 function importSheet(){
-  openSheet(`<h2>Import</h2><p class="sub">Load a hive CSV or GeoJSON of cell assignments.</p>
+  // holds a binary GeoPackage (base64) when one is chosen, so we don't try to
+  // shove it through the text box.
+  let gpkgB64=null;
+  openSheet(`<h2>Import</h2><p class="sub">Load a CSV, GeoJSON or GeoPackage of cell assignments.</p>
     <label>Mode</label>
     <select id="impMode"><option value="replace">Replace whole map</option><option value="merge">Merge into current</option></select>
-    <label>Paste CSV or GeoJSON <span style="font-weight:400">(GeoJSON opens straight into QGIS → save as .gpkg)</span></label>
+    <label>Paste CSV or GeoJSON <span style="font-weight:400">(or choose a .gpkg file below)</span></label>
     <textarea id="impText" placeholder="cell_id,lat,lon,land_use,wildlife,group,note&#10;1,7.90,31.85,grazing,0,,"></textarea>
     <label>…or choose a file</label>
-    <input type="file" id="impFile" accept=".csv,.geojson,.json">
+    <input type="file" id="impFile" accept=".csv,.geojson,.json,.gpkg">
+    <div id="impFileName" class="hint"></div>
     <div class="row end"><button class="btn primary" id="impGo">Import</button></div>
-    <div class="hint">CSV columns are matched by header name: cell_id, land_use, wildlife (0/1), group, note. The exported lat/lon columns are ignored on import. GeoJSON features need a <code>cell_id</code> property.</div>`);
+    <div class="hint">Matched by <code>cell_id</code>: land_use, wildlife (0/1), group, note. Other columns (lat/lon/area/geometry) are ignored on import. A GeoPackage round-trips an exported map straight back in.</div>`);
   document.getElementById('impFile').onchange=e=>{
     const f=e.target.files[0]; if(!f) return;
-    const rd=new FileReader(); rd.onload=()=>{ document.getElementById('impText').value=rd.result; }; rd.readAsText(f);
+    const nameEl=document.getElementById('impFileName');
+    if(/\.gpkg$/i.test(f.name)){
+      const rd=new FileReader();
+      rd.onload=()=>{ gpkgB64=String(rd.result).split(',').pop(); // strip data-URL prefix
+        document.getElementById('impText').value='';
+        nameEl.textContent='GeoPackage loaded: '+f.name+' — press Import.'; };
+      rd.readAsDataURL(f); // binary -> base64
+    } else {
+      gpkgB64=null;
+      const rd=new FileReader(); rd.onload=()=>{ document.getElementById('impText').value=rd.result; nameEl.textContent=''; }; rd.readAsText(f);
+    }
   };
   document.getElementById('impGo').onclick=async()=>{
-    const text=document.getElementById('impText').value.trim();
-    if(!text){ toast('Nothing to import'); return; }
     const mode=document.getElementById('impMode').value;
-    const fmt = text[0]==='{' ? 'geojson' : 'csv';
+    let fmt, text;
+    if(gpkgB64){ fmt='gpkg'; text=gpkgB64; }
+    else {
+      text=document.getElementById('impText').value.trim();
+      if(!text){ toast('Nothing to import'); return; }
+      fmt = text[0]==='{' ? 'geojson' : 'csv';
+    }
     const r=await api('/api/import','POST',{format:fmt, text, mode});
     if(r&&r.cells){ applyServerState(r); toast('Imported '+(r.imported||0)+' cells'); closeSheet(); }
-    else toast('Import failed');
+    else toast((r&&r.error)||'Import failed');
   };
 }
 

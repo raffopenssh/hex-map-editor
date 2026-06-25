@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -418,8 +417,8 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateReq struct {
-	Op    string `json:"op"`   // setUse | clearUse | setWildlife | group | note | delete
-	IDs   []int  `json:"ids"`  // affected cells
+	Op    string `json:"op"`  // setUse | clearUse | setWildlife | group | note | delete
+	IDs   []int  `json:"ids"` // affected cells
 	Value string `json:"value"`
 	Flag  bool   `json:"flag"`
 }
@@ -724,6 +723,8 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch fmtq {
+	case "gpkg", "geopackage":
+		s.exportGeoPackage(w, cells)
 	case "geojson":
 		s.exportGeoJSON(w, cells)
 	default:
@@ -734,45 +735,17 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 func (s *Server) exportCSV(w http.ResponseWriter, cells map[string]cellState) {
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", "attachment; filename=\"landuse.csv\"")
-	centroids := s.cellCentroids() // id -> [lon,lat]
-	fmt.Fprintln(w, "cell_id,lat,lon,land_use,wildlife,group,note")
-	ids := make([]int, 0, len(cells))
-	for k := range cells {
-		n, _ := strconv.Atoi(k)
-		ids = append(ids, n)
-	}
-	sort.Ints(ids)
-	for _, idn := range ids {
+	fmt.Fprintln(w, "cell_id,lat,lon,land_use,land_use_label,wildlife,group,note,area_ha")
+	for _, idn := range sortedCellIDs(cells) {
 		c := cells[strconv.Itoa(idn)]
-		var lat, lon string
-		if ct, ok := centroids[idn]; ok && len(ct) == 2 {
-			lon = strconv.FormatFloat(ct[0], 'f', 6, 64)
-			lat = strconv.FormatFloat(ct[1], 'f', 6, 64)
-		}
-		fmt.Fprintf(w, "%d,%s,%s,%s,%d,%s,%s\n", idn, lat, lon, csvEsc(c.U), c.W, csvEsc(c.Grp), csvEsc(c.Nt))
+		lon, lat := gidCentroid(idn)
+		fmt.Fprintf(w, "%d,%s,%s,%s,%s,%d,%s,%s,%.1f\n",
+			idn,
+			strconv.FormatFloat(lat, 'f', 6, 64),
+			strconv.FormatFloat(lon, 'f', 6, 64),
+			csvEsc(c.U), csvEsc(useLabel(c.U)), c.W,
+			csvEsc(c.Grp), csvEsc(c.Nt), cellAreaHa(idn))
 	}
-}
-
-// cellCentroids loads each grid cell's centroid ([lon,lat]) from the static grid.
-func (s *Server) cellCentroids() map[int][]float64 {
-	out := map[int][]float64{}
-	gb, err := readFile(filepath.Join(s.StaticDir, "data", "grid.json"))
-	if err != nil {
-		return out
-	}
-	var grid struct {
-		Cells []struct {
-			ID int       `json:"id"`
-			Ct []float64 `json:"ct"`
-		} `json:"cells"`
-	}
-	if json.Unmarshal(gb, &grid) != nil {
-		return out
-	}
-	for _, c := range grid.Cells {
-		out[c.ID] = c.Ct
-	}
-	return out
 }
 
 func csvEsc(s string) string {
@@ -782,49 +755,34 @@ func csvEsc(s string) string {
 	return s
 }
 
-// exportGeoJSON builds polygons from the static grid plus assignments.
+// exportGeoJSON builds polygons from the dynamic global lattice plus assignments.
 func (s *Server) exportGeoJSON(w http.ResponseWriter, cells map[string]cellState) {
-	gb, err := readFile(filepath.Join(s.StaticDir, "data", "grid.json"))
-	if err != nil {
-		writeJSON(w, 500, map[string]string{"error": "grid missing"})
-		return
-	}
-	var grid struct {
-		Cells []struct {
-			ID int         `json:"id"`
-			G  [][]float64 `json:"g"`
-		} `json:"cells"`
-	}
-	if err := json.Unmarshal(gb, &grid); err != nil {
-		writeJSON(w, 500, map[string]string{"error": err.Error()})
-		return
-	}
 	w.Header().Set("Content-Type", "application/geo+json")
 	w.Header().Set("Content-Disposition", "attachment; filename=\"landuse.geojson\"")
 	w.Write([]byte(`{"type":"FeatureCollection","features":[`))
 	first := true
-	for _, c := range grid.Cells {
-		st, ok := cells[strconv.Itoa(c.ID)]
-		if !ok {
-			continue
-		}
+	for _, id := range sortedCellIDs(cells) {
+		st := cells[strconv.Itoa(id)]
 		if !first {
 			w.Write([]byte(","))
 		}
 		first = false
-		ring := make([][]float64, 0, len(c.G)+1)
-		ring = append(ring, c.G...)
-		if len(c.G) > 0 {
-			ring = append(ring, c.G[0])
+		ring := gidPolygon(id)
+		coords := make([][]float64, len(ring))
+		for i, p := range ring {
+			coords[i] = []float64{p[0], p[1]}
 		}
+		lon, lat := gidCentroid(id)
 		feat := map[string]interface{}{
 			"type": "Feature",
 			"geometry": map[string]interface{}{
 				"type":        "Polygon",
-				"coordinates": [][][]float64{ring},
+				"coordinates": [][][]float64{coords},
 			},
 			"properties": map[string]interface{}{
-				"cell_id": c.ID, "land_use": st.U, "wildlife": st.W, "group": st.Grp, "note": st.Nt,
+				"cell_id": id, "land_use": st.U, "land_use_label": useLabel(st.U),
+				"wildlife": st.W, "group": st.Grp, "note": st.Nt,
+				"area_ha": cellAreaHa(id), "lon": lon, "lat": lat,
 			},
 		}
 		jb, _ := json.Marshal(feat)
@@ -840,10 +798,10 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Format string                `json:"format"` // csv|geojson
-		Text   string                `json:"text"`
-		Cells  map[string]cellState  `json:"cells"`
-		Mode   string                `json:"mode"` // replace|merge
+		Format string               `json:"format"` // csv|geojson|gpkg
+		Text   string               `json:"text"`   // raw text, or base64 for gpkg
+		Cells  map[string]cellState `json:"cells"`
+		Mode   string               `json:"mode"` // replace|merge
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "bad request"})
@@ -858,6 +816,14 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Format == "geojson" && body.Text != "" {
 		parsed = parseImportGeoJSON(body.Text)
+	}
+	if body.Format == "gpkg" && body.Text != "" {
+		p, err := parseImportGeoPackage(body.Text)
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"error": "bad GeoPackage: " + err.Error()})
+			return
+		}
+		parsed = p
 	}
 	if len(parsed) == 0 {
 		writeJSON(w, 400, map[string]string{"error": "nothing to import"})
