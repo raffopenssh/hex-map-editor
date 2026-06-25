@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#f7f6f2">
+<title>Land Use Zonation</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="map"></div>
+
+<!-- Legend / use picker -->
+<div id="legend" class="panel">
+  <div class="legend-head">
+    <span id="legendTitle">Land use</span>
+    <button id="legendToggle" class="chip-btn" title="Collapse">▾</button>
+  </div>
+  <div id="legendBody"></div>
+</div>
+
+<!-- Toolbar -->
+<div id="toolbar" class="panel">
+  <button class="tool" data-tool="draw" title="Draw (assign use)"><span class="ic">✎</span><span class="lbl">Draw</span></button>
+  <button class="tool" data-tool="erase" title="Rubber (clear use)"><span class="ic">⌫</span><span class="lbl">Rubber</span></button>
+  <button class="tool" id="menuBtn" title="More"><span class="ic">⋯</span><span class="lbl">More</span></button>
+</div>
+
+<!-- Status / selection bar -->
+<div id="statusbar" class="panel hidden">
+  <span id="selCount">0 selected</span>
+  <span class="sb-actions">
+    <button id="sbWildlife" class="chip-btn" title="Toggle wildlife range">＋Wildlife</button>
+    <button id="sbGroup" class="chip-btn">Group</button>
+    <button id="sbNote" class="chip-btn">Note</button>
+    <button id="sbClear" class="chip-btn danger">Clear</button>
+    <button id="sbDone" class="chip-btn primary">Done</button>
+  </span>
+</div>
+
+<!-- Top-right account / menu -->
+<div id="topbar">
+  <button id="accountBtn" class="round-btn" title="Menu">☰</button>
+</div>
+
+<!-- Sheet / modal -->
+<div id="sheetOverlay" class="overlay hidden"></div>
+<div id="sheet" class="sheet hidden"></div>
+
+<!-- Toast -->
+<div id="toast" class="toast hidden"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

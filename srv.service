@@ -1,0 +1,18 @@
+[Unit]
+Description=Land Use Zonation editor
+After=network.target
+
+[Service]
+Type=simple
+User=exedev
+Group=exedev
+WorkingDirectory=/home/exedev/landuse
+ExecStart=/home/exedev/landuse/landuse-srv -listen :8000
+Restart=always
+RestartSec=3
+Environment=HOME=/home/exedev
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
