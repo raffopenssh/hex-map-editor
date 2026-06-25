@@ -1,8 +1,9 @@
-# Land Use Zonation editor
+# hex-map-editor — Land Use Zonation editor
 
 A minimal mobile + desktop web editor for assigning land use to a hexagonal
-grid (10 km² per cell) over a light basemap. Built for the Tango Team land-use
-zonation workflow (Jonglei / Boma, South Sudan).
+grid (~10 km² per cell) over a light basemap. Built for the Tango Team land-use
+zonation workflow (Jonglei / Boma, South Sudan), but the grid is a **dynamic
+global lattice** — it works for any country / canvas, not just the seeded extent.
 
 ## Features
 - **Map is the UI.** Just the map, a legend/use picker, and tools: Draw,
@@ -18,6 +19,12 @@ zonation workflow (Jonglei / Boma, South Sudan).
   overlay — the only layer drawn with a strong (bold dark) boundary — toggled by
   selecting hexes and tapping it in the legend.
 - **Layer visibility.** Each legend row has an eye to hide/show that layer.
+  Hidden layers draw nothing and are not selectable.
+- **Dynamic hex grid.** Hexes are generated on the fly from a global flat-top
+  lattice (pitch fixed so a cell is ~10 km²). Cell ids encode their (row,col) on
+  that lattice, so they're globally unique and stable as you pan/zoom — you can
+  draw anywhere on Earth and it persists. A zoom-in hint appears when the view is
+  too coarse to render the grid.
 - Empty (unassigned) cells are not drawn.
 - **Import / export** the whole hive as CSV or GeoJSON.
 - **Versions**: every edit is **autosaved** as a snapshot; name any version to
@@ -32,16 +39,40 @@ zonation workflow (Jonglei / Boma, South Sudan).
   Kob wildlife range.
 
 ## Layout
-- `cmd/srv` — binary entrypoint
+- `cmd/srv` — binary entrypoint (`-listen :8000`)
 - `srv` — HTTP server + API (`server.go`, `helpers.go`)
-- `srv/static` — `index.html`, `app.css`, `app.js`
-- `srv/static/data` — `grid.json(.gz)` (8929 hex cells, WGS84), `initial.json` (seed)
-- `db/migrations` — schema (`002-landuse.sql`)
-- `scripts` — Python used to derive the grid + initial classification from source GIS
+- `srv/static` — `index.html`, `app.css`, `app.js` (grid generated client-side)
+- `srv/static/data` — `initial.json` (seed for Boma mode); `grid.json(.gz)` is
+  the legacy source grid, now superseded by the dynamic lattice
+- `db/migrations` — schema
+- `scripts` — Python used to derive the original grid + classification from GIS
 
-## Run
-    make build && ./landuse-srv          # listens on :8000
-Or via systemd unit `landuse.service`.
+## Install & run (local)
+Requires Go 1.21+.
+
+    git clone https://github.com/raffopenssh/hex-map-editor.git
+    cd hex-map-editor
+    make build            # -> ./landuse-srv
+    ./landuse-srv -listen :8000
+
+Open http://localhost:8000. The SQLite database (`db.sqlite3`) and Boma seed are
+created/applied automatically on first run. Sign in with a name + secret:
+
+- `boma@250626` → the Boma / Jonglei land-use data + full hex editor.
+- any other secret → a blank global canvas (pan/zoom to any country and draw).
+
+## Deploy (systemd)
+Edit `srv.service` if your paths/user differ, then:
+
+    sudo cp srv.service /etc/systemd/system/hex-map-editor.service
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now hex-map-editor
+    systemctl status hex-map-editor
+    journalctl -u hex-map-editor -f
+
+The service runs the binary with `WorkingDirectory` set so the SQLite DB and
+static assets resolve relative to the repo. Put it behind a TLS-terminating
+reverse proxy (nginx/Caddy) for public access.
 
 ## Tools
 - **Pan** — move the map without editing.
