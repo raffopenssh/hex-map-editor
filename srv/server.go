@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"srv.exe.dev/db"
@@ -25,6 +26,20 @@ type Server struct {
 	DB        *sql.DB
 	Hostname  string
 	StaticDir string
+
+	autoMu    sync.Mutex
+	autoTimer *time.Timer
+}
+
+// scheduleAutosave debounces autosave snapshots so a burst of edits (a paint
+// stroke) collapses into one snapshot a few seconds after activity settles.
+func (s *Server) scheduleAutosave(by string) {
+	s.autoMu.Lock()
+	defer s.autoMu.Unlock()
+	if s.autoTimer != nil {
+		s.autoTimer.Stop()
+	}
+	s.autoTimer = time.AfterFunc(4*time.Second, func() { s.autosaveSnapshot(by) })
 }
 
 func New(dbPath, hostname string) (*Server, error) {
@@ -143,63 +158,101 @@ func (s *Server) seedIfNeeded() error {
 
 // ---- auth ----
 
+// The one secret that unlocks the original Boma / Jonglei land-use data.
+// Any other secret signs the user into a blank global map instead.
+const bomaSecret = "boma@250626"
+
+const (
+	modeBoma   = "boma"
+	modeGlobal = "global"
+)
+
+func modeForSecret(secret string) string {
+	if secret == bomaSecret {
+		return modeBoma
+	}
+	return modeGlobal
+}
+
 type identity struct {
 	OwnerEmail string
 	Email      string // exe.dev email of requester
 	Name       string // editor name (from cookie)
+	Mode       string // boma | global (from cookie)
 	IsOwner    bool
-	Authed     bool // has valid editor session OR is owner
+	Authed     bool // has a valid signed editor session cookie
 }
 
-func (s *Server) secret() string {
-	v, _ := s.getMeta("secret")
-	return v
+// signKey is a stable server-side HMAC key for session cookies. It is
+// independent of any user secret (users no longer share a single secret).
+func (s *Server) signKey() []byte {
+	if v, ok := s.getMeta("sign_key"); ok && v != "" {
+		if b, err := hex.DecodeString(v); err == nil {
+			return b
+		}
+	}
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	_ = s.setMeta("sign_key", hex.EncodeToString(b))
+	return b
 }
 
-func (s *Server) sign(name string) string {
-	mac := hmac.New(sha256.New, []byte(s.secret()))
-	mac.Write([]byte(name))
+func (s *Server) sign(payload string) string {
+	mac := hmac.New(sha256.New, s.signKey())
+	mac.Write([]byte(payload))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func (s *Server) makeCookieValue(name string) string {
-	enc := base64.RawURLEncoding.EncodeToString([]byte(name))
-	return enc + "." + s.sign(name)
+// cookie payload is "name\x1fmode"
+func (s *Server) makeCookieValue(name, mode string) string {
+	payload := name + "\x1f" + mode
+	enc := base64.RawURLEncoding.EncodeToString([]byte(payload))
+	return enc + "." + s.sign(payload)
 }
 
-func (s *Server) parseCookieValue(val string) (string, bool) {
+func (s *Server) parseCookieValue(val string) (name, mode string, ok bool) {
 	parts := strings.SplitN(val, ".", 2)
 	if len(parts) != 2 {
-		return "", false
+		return "", "", false
 	}
 	nb, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
-	name := string(nb)
-	if hmac.Equal([]byte(s.sign(name)), []byte(parts[1])) {
-		return name, true
+	payload := string(nb)
+	if !hmac.Equal([]byte(s.sign(payload)), []byte(parts[1])) {
+		return "", "", false
 	}
-	return "", false
+	seg := strings.SplitN(payload, "\x1f", 2)
+	name = seg[0]
+	if len(seg) == 2 {
+		mode = seg[1]
+	} else {
+		mode = modeBoma // legacy cookies
+	}
+	return name, mode, true
 }
 
 func (s *Server) identify(r *http.Request) identity {
 	id := identity{}
 	id.OwnerEmail, _ = s.getMeta("owner_email")
 	id.Email = strings.TrimSpace(r.Header.Get("X-ExeDev-Email"))
+	// Record the first exe.dev visitor as the owner (for the admin badge only).
+	if id.OwnerEmail == "" && id.Email != "" {
+		_ = s.setMeta("owner_email", id.Email)
+		id.OwnerEmail = id.Email
+	}
 	if id.OwnerEmail != "" && id.Email != "" && strings.EqualFold(id.Email, id.OwnerEmail) {
 		id.IsOwner = true
-		id.Authed = true
 	}
-	if c, err := r.Cookie("lu_session"); err == nil && s.secret() != "" {
-		if name, ok := s.parseCookieValue(c.Value); ok {
+	// Authentication is solely the signed session cookie — owner status alone
+	// does NOT authenticate, so signing out actually signs you out.
+	if c, err := r.Cookie("lu_session"); err == nil {
+		if name, mode, ok := s.parseCookieValue(c.Value); ok {
 			id.Name = name
+			id.Mode = mode
 			id.Authed = true
 		}
-	}
-	if id.IsOwner && id.Name == "" {
-		// derive a friendly owner name
-		id.Name = "Owner"
 	}
 	return id
 }
@@ -216,15 +269,14 @@ func (s *Server) Serve(addr string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("GET /api/me", s.handleMe)
-	mux.HandleFunc("POST /api/setup", s.handleSetup)
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
-	mux.HandleFunc("POST /api/reset-secret", s.handleResetSecret)
 	mux.HandleFunc("GET /api/state", s.handleState)
 	mux.HandleFunc("POST /api/update", s.handleUpdate)
 	mux.HandleFunc("GET /api/versions", s.handleVersionsList)
 	mux.HandleFunc("POST /api/versions", s.handleVersionSave)
 	mux.HandleFunc("GET /api/versions/{token}", s.handleVersionGet)
+	mux.HandleFunc("POST /api/versions/{token}", s.handleVersionRename)
 	mux.HandleFunc("POST /api/versions/{token}/restore", s.handleVersionRestore)
 	mux.HandleFunc("GET /api/export", s.handleExport)
 	mux.HandleFunc("POST /api/import", s.handleImport)
@@ -256,14 +308,13 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	id := s.identify(r)
-	hasSecret := s.secret() != ""
 	writeJSON(w, 200, map[string]interface{}{
-		"authed":    id.Authed,
-		"owner":     id.IsOwner,
-		"name":      id.Name,
-		"hasSecret": hasSecret,
-		"email":     id.Email,
-		"title":     firstNonEmpty(metaOr(s, "title"), "Land Use Zonation"),
+		"authed": id.Authed,
+		"owner":  id.IsOwner,
+		"name":   id.Name,
+		"mode":   id.Mode,
+		"email":  id.Email,
+		"title":  firstNonEmpty(metaOr(s, "title"), "Land Use Zonation"),
 	})
 }
 
@@ -283,69 +334,32 @@ func randToken(n int) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
-	if s.secret() != "" {
-		writeJSON(w, 409, map[string]string{"error": "already configured"})
-		return
-	}
-	id := s.identify(r)
-	// If an owner email is already designated, only that owner may run setup.
-	if owner, ok := s.getMeta("owner_email"); ok && owner != "" {
-		if id.Email != "" && !strings.EqualFold(id.Email, owner) {
-			writeJSON(w, 403, map[string]string{"error": "only the owner can set this up"})
-			return
-		}
-	}
-	var body struct{ Secret, Name, Title string }
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Secret) == "" {
-		writeJSON(w, 400, map[string]string{"error": "secret required"})
-		return
-	}
-	_ = s.setMeta("secret", body.Secret)
-	if id.Email != "" {
-		_ = s.setMeta("owner_email", id.Email)
-	}
-	if body.Title != "" {
-		_ = s.setMeta("title", body.Title)
-	}
-	name := strings.TrimSpace(body.Name)
-	if name == "" {
-		name = "Owner"
-	}
-	s.setSessionCookie(w, name)
-	writeJSON(w, 200, map[string]string{"ok": "1", "name": name})
-}
-
+// handleLogin accepts a name + secret. We don't store a shared secret; the
+// secret value alone decides which map you see: the canonical Boma data for
+// the magic phrase, or a blank global map for anything else.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var body struct{ Secret, Name string }
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "bad request"})
 		return
 	}
-	if s.secret() == "" {
-		writeJSON(w, 409, map[string]string{"error": "not configured"})
+	if strings.TrimSpace(body.Secret) == "" {
+		writeJSON(w, 400, map[string]string{"error": "secret required"})
 		return
 	}
-	if subtleCompare(body.Secret, s.secret()) != true {
-		writeJSON(w, 403, map[string]string{"error": "wrong secret"})
-		return
-	}
+	mode := modeForSecret(body.Secret)
 	name := strings.TrimSpace(body.Name)
 	if name == "" {
 		name = randomEditorName()
 	}
-	s.setSessionCookie(w, name)
-	writeJSON(w, 200, map[string]string{"ok": "1", "name": name})
+	s.setSessionCookie(w, name, mode)
+	writeJSON(w, 200, map[string]string{"ok": "1", "name": name, "mode": mode})
 }
 
-func subtleCompare(a, b string) bool {
-	return hmac.Equal([]byte(a), []byte(b))
-}
-
-func (s *Server) setSessionCookie(w http.ResponseWriter, name string) {
+func (s *Server) setSessionCookie(w http.ResponseWriter, name, mode string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "lu_session",
-		Value:    s.makeCookieValue(name),
+		Value:    s.makeCookieValue(name, mode),
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
@@ -355,22 +369,6 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, name string) {
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: "lu_session", Value: "", Path: "/", MaxAge: -1})
-	writeJSON(w, 200, map[string]string{"ok": "1"})
-}
-
-func (s *Server) handleResetSecret(w http.ResponseWriter, r *http.Request) {
-	id := s.identify(r)
-	if !id.IsOwner {
-		writeJSON(w, 403, map[string]string{"error": "owner only"})
-		return
-	}
-	var body struct{ Secret string }
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Secret) == "" {
-		writeJSON(w, 400, map[string]string{"error": "secret required"})
-		return
-	}
-	_ = s.setMeta("secret", body.Secret)
-	s.setSessionCookie(w, firstNonEmpty(id.Name, "Owner"))
 	writeJSON(w, 200, map[string]string{"ok": "1"})
 }
 
@@ -512,6 +510,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			changed[strconv.Itoa(cid)] = cellState{}
 		}
 	}
+	s.scheduleAutosave(firstNonEmpty(id.Name, "Editor"))
 	writeJSON(w, 200, map[string]interface{}{"rev": rev, "changed": changed})
 }
 
@@ -523,7 +522,7 @@ func (s *Server) handleVersionsList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 401, map[string]string{"error": "auth required"})
 		return
 	}
-	rows, err := s.DB.Query("SELECT token,name,COALESCE(author,''),created_at FROM versions ORDER BY id DESC")
+	rows, err := s.DB.Query("SELECT token,name,COALESCE(author,''),COALESCE(kind,'named'),created_at FROM versions ORDER BY id DESC")
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -531,10 +530,10 @@ func (s *Server) handleVersionsList(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	var list []map[string]string
 	for rows.Next() {
-		var tok, name, auth string
+		var tok, name, auth, kind string
 		var created time.Time
-		_ = rows.Scan(&tok, &name, &auth, &created)
-		list = append(list, map[string]string{"token": tok, "name": name, "author": auth, "created": created.Format(time.RFC3339)})
+		_ = rows.Scan(&tok, &name, &auth, &kind, &created)
+		list = append(list, map[string]string{"token": tok, "name": name, "author": auth, "kind": kind, "created": created.Format(time.RFC3339)})
 	}
 	writeJSON(w, 200, map[string]interface{}{"versions": list})
 }
@@ -558,12 +557,64 @@ func (s *Server) handleVersionSave(w http.ResponseWriter, r *http.Request) {
 	}
 	data, _ := json.Marshal(cells)
 	tok := randToken(9)
-	_, err = s.DB.Exec("INSERT INTO versions(token,name,author,data) VALUES(?,?,?,?)", tok, name, firstNonEmpty(id.Name, "Editor"), string(data))
+	_, err = s.DB.Exec("INSERT INTO versions(token,name,author,data,kind) VALUES(?,?,?,?,'named')", tok, name, firstNonEmpty(id.Name, "Editor"), string(data))
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, 200, map[string]string{"token": tok, "name": name})
+}
+
+// handleVersionRename gives a name to a version (e.g. an autosaved snapshot the
+// user wants to keep / share). Naming an autosave promotes it to 'named' so it
+// won't be pruned.
+func (s *Server) handleVersionRename(w http.ResponseWriter, r *http.Request) {
+	id := s.identify(r)
+	if !id.Authed {
+		writeJSON(w, 401, map[string]string{"error": "auth required"})
+		return
+	}
+	tok := r.PathValue("token")
+	var body struct{ Name string }
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Name) == "" {
+		writeJSON(w, 400, map[string]string{"error": "name required"})
+		return
+	}
+	res, err := s.DB.Exec("UPDATE versions SET name=?, kind='named' WHERE token=?", strings.TrimSpace(body.Name), tok)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeJSON(w, 404, map[string]string{"error": "not found"})
+		return
+	}
+	writeJSON(w, 200, map[string]string{"ok": "1", "name": strings.TrimSpace(body.Name)})
+}
+
+// autosaveSnapshot stores the current state as an automatic version. Keeps every
+// reasonable snapshot: it skips saving when nothing changed since the last
+// autosave, and prunes only old *auto* snapshots (named versions are kept).
+func (s *Server) autosaveSnapshot(by string) {
+	_, cells, err := s.loadState()
+	if err != nil {
+		return
+	}
+	data, _ := json.Marshal(cells)
+	// dedupe against most recent autosave
+	var last string
+	_ = s.DB.QueryRow("SELECT data FROM versions WHERE kind='auto' ORDER BY id DESC LIMIT 1").Scan(&last)
+	if last == string(data) {
+		return
+	}
+	name := "Autosave " + time.Now().Format("Jan 2 15:04")
+	tok := randToken(9)
+	if _, err := s.DB.Exec("INSERT INTO versions(token,name,author,data,kind) VALUES(?,?,?,?,'auto')", tok, name, firstNonEmpty(by, "Editor"), string(data)); err != nil {
+		return
+	}
+	// prune: keep the most recent 50 autosaves
+	_, _ = s.DB.Exec(`DELETE FROM versions WHERE kind='auto' AND id NOT IN (
+		SELECT id FROM versions WHERE kind='auto' ORDER BY id DESC LIMIT 50)`)
 }
 
 func (s *Server) handleVersionGet(w http.ResponseWriter, r *http.Request) {

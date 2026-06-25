@@ -20,9 +20,14 @@ zonation workflow (Jonglei / Boma, South Sudan).
 - **Layer visibility.** Each legend row has an eye to hide/show that layer.
 - Empty (unassigned) cells are not drawn.
 - **Import / export** the whole hive as CSV or GeoJSON.
-- **Versions**: save a named snapshot, share a `?v=<token>` link, restore.
-- **Access control**: a shared secret gates editing; the VM owner is auto-admin.
-  Editors get anonymous names (or pick their own).
+- **Versions**: every edit is **autosaved** as a snapshot; name any version to
+  keep it, share its `?v=<token>` link, or restore. Naming an autosave promotes
+  it so it won't be pruned (last 50 autosaves are kept).
+- **Two modes by secret** (no real accounts — just a name + secret):
+  - `boma@250626` → the original Boma / Jonglei land-use data + full hex editor.
+  - any other secret → a blank global world map you can pan and zoom to a country.
+- **Sign out** clears the session cookie (auth is the cookie alone — owner email
+  no longer auto-authenticates, so signing out actually signs you out).
 - Initial map is seeded from the provided colour land-use raster + White-eared
   Kob wildlife range.
 
@@ -38,14 +43,22 @@ zonation workflow (Jonglei / Boma, South Sudan).
     make build && ./landuse-srv          # listens on :8000
 Or via systemd unit `landuse.service`.
 
+## Tools
+- **Pan** — move the map without editing.
+- **Draw / Rubber** — paint / clear land use (brush size auto-shows for these).
+- **Select** — magic-wand / lasso, then Group, Ungroup (dissolve), Note,
+  Clear use, or Delete (wipes everything for the cells) from the bottom bar.
+- **Hover** — shows a cell's land use, area (ha), group, and notes.
+
 ## API
-- `GET  /api/me`        identity + config
-- `POST /api/setup`     owner first-run (secret, title)
-- `POST /api/login`     join with secret, optional name
+- `GET  /api/me`        identity + mode (boma|global)
+- `POST /api/login`     name + secret (secret picks the mode)
+- `POST /api/logout`    clear session
 - `GET  /api/state`     full assignment map
 - `POST /api/update`    op: setUse|clearUse|setWildlife|group|note|delete
 - `GET/POST /api/versions`        list / save snapshot
 - `GET  /api/versions/{token}`    fetch snapshot (shareable)
+- `POST /api/versions/{token}`    rename / name a version (keeps autosaves)
 - `POST /api/versions/{token}/restore`
 - `GET  /api/export?fmt=csv|geojson` (CSV includes centroid lat/lon)
 - `POST /api/import`    {format, text, mode:replace|merge}

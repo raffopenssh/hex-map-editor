@@ -98,6 +98,32 @@ html,body{margin:0;height:100%;font-family:-apple-system,BlinkMacSystemFont,"Seg
 #map.tool-draw{cursor:crosshair}
 #map.tool-erase{cursor:cell}
 #map.tool-select{cursor:pointer}
+#map.tool-pan{cursor:grab}
+#map.tool-pan:active{cursor:grabbing}
+
+/* hover tooltip: land use, area, group, notes */
+.hovertip{position:fixed;z-index:3500;pointer-events:none;background:rgba(28,30,27,.94);color:#fff;
+  padding:8px 10px;border-radius:9px;font-size:12px;line-height:1.35;max-width:240px;box-shadow:var(--shadow)}
+.hovertip .ht-row{white-space:nowrap}
+.hovertip .ht-row+.ht-row{margin-top:2px}
+.hovertip .ht-note{margin-top:5px;padding-top:5px;border-top:1px solid rgba(255,255,255,.18);
+  white-space:normal;color:#e7e7e2;font-style:italic}
+
+/* autosave badge in version list */
+.badge{display:inline-block;font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
+  background:#e8e8e3;color:#777;border-radius:5px;padding:1px 5px;margin-left:5px;vertical-align:middle}
+.list-item.auto .meta .t{color:var(--muted);font-weight:600}
+
+/* global-mode country search */
+#countrybar{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:1200;width:min(420px,92vw);padding:6px}
+#countrybar input{width:100%;border:none;outline:none;background:transparent;font-size:15px;padding:8px 10px}
+#countryResults{margin-top:2px}
+#countryResults .cr-item{padding:8px 10px;border-radius:8px;font-size:13px;cursor:pointer;color:var(--ink)}
+#countryResults .cr-item:hover{background:#f0efe9}
+#countryResults .cr-item.muted{color:var(--muted);cursor:default}
+/* in global mode hide the editing chrome */
+body.global-mode #legend,body.global-mode #toolbar,body.global-mode #brushctl,
+body.global-mode #statusbar,body.global-mode #geoBtn{display:none!important}
 
 @media (max-width:560px){
   #legend{max-width:46vw;font-size:12px}

@@ -22,6 +22,7 @@
 
 <!-- Toolbar -->
 <div id="toolbar" class="panel">
+  <button class="tool" data-tool="pan" title="Pan / move map"><span class="ic">✋</span><span class="lbl">Pan</span></button>
   <button class="tool" data-tool="draw" title="Draw (assign use)"><span class="ic">✎</span><span class="lbl">Draw</span></button>
   <button class="tool" data-tool="erase" title="Rubber (clear use)"><span class="ic">⌫</span><span class="lbl">Rubber</span></button>
   <button class="tool" data-tool="select" title="Select hexes"><span class="ic">⬡</span><span class="lbl">Select</span></button>
@@ -41,8 +42,10 @@
   <span id="selCount">0 selected</span>
   <span class="sb-actions">
     <button id="sbGroup" class="chip-btn">Group</button>
+    <button id="sbDissolve" class="chip-btn">Ungroup</button>
     <button id="sbNote" class="chip-btn">Note</button>
-    <button id="sbClear" class="chip-btn danger">Clear</button>
+    <button id="sbClear" class="chip-btn">Clear use</button>
+    <button id="sbDelete" class="chip-btn danger">Delete</button>
     <button id="sbDone" class="chip-btn primary">Done</button>
   </span>
 </div>
@@ -59,6 +62,9 @@
 
 <!-- Toast -->
 <div id="toast" class="toast hidden"></div>
+
+<!-- Hover tooltip (area / group / note) -->
+<div id="hovertip" class="hovertip hidden"></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="/static/app.js"></script>

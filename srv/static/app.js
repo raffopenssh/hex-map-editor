@@ -375,6 +375,8 @@ async function flushOps(){
 // pointer events
 function onDown(e){
   if(!grid||!me||!me.authed) return;
+  // Pan tool: leave the gesture to Leaflet so the map moves. Shift still selects.
+  if(tool==='pan' && !e.shiftKey) return;
   const isSelect = e.shiftKey || tool==='select';
   const c = pickCell(eventLatLng(e));
   if(!c){ return; }
@@ -395,19 +397,60 @@ function onMove(e){
 function onUp(){
   if(painting){ painting=false; map.dragging.enable(); selectAction=null; flushOps(); renderLegend(); }
 }
-// desktop hover preview for brush / magic-wand
+// desktop hover preview for brush / magic-wand + info tooltip
 function onHover(e){
-  if(painting || !grid || !me || !me.authed) return;
-  if(!(tool==='draw'||tool==='erase'||tool==='select')){ if(hoverId!=null){hoverId=null;scheduleDraw();} return; }
-  const c = pickCell(eventLatLng(e));
+  if(painting || !grid || !me || !me.authed){ return; }
+  const editing = (tool==='draw'||tool==='erase'||tool==='select');
+  const c = cellAt(eventLatLng(e)); // exact cell (not snapped) for the tooltip
   const id = c? c.id : null;
-  if(id!==hoverId){ hoverId=id; scheduleDraw(); }
+  // brush / wand preview only for editing tools, and only when over a real hex
+  let previewId=null; if(editing){ const pc=pickCell(eventLatLng(e)); previewId=pc?pc.id:null; }
+  if(previewId!==hoverId){ hoverId=previewId; scheduleDraw(); }
+  // tooltip: any tool, only when actually over an assigned/known cell
+  updateHovertip(c, e);
 }
+
+function cellInfoHTML(c){
+  const st=state.get(c.id)||{};
+  const areaHa = (grid.cellAreaKm2||10)*100; // km² -> ha
+  let html='';
+  const use=st.u?USEMAP[st.u]:null;
+  html+=`<div class="ht-row"><b>${use?esc(use.label):'Unassigned'}</b></div>`;
+  if(st.grp){
+    let cells=0; for(const s of state.values()) if(s.grp===st.grp) cells++;
+    html+=`<div class="ht-row">Group: <b>${esc(st.grp)}</b> · ${cells} hex · ${fmtHa(cells*areaHa)}</div>`;
+  } else {
+    html+=`<div class="ht-row">${fmtHa(areaHa)}</div>`;
+  }
+  if(st.w) html+=`<div class="ht-row">Wildlife range</div>`;
+  if(st.nt) html+=`<div class="ht-note">${esc(st.nt)}</div>`;
+  return html;
+}
+function fmtHa(ha){
+  if(ha>=100000) return (ha/100).toLocaleString(undefined,{maximumFractionDigits:0})+' km\u00b2';
+  return ha.toLocaleString(undefined,{maximumFractionDigits:0})+' ha';
+}
+function updateHovertip(c, e){
+  const tip=document.getElementById('hovertip');
+  if(!c){ hideHovertip(); return; }
+  const st=state.get(c.id);
+  // only show when there's something worth showing (assigned, grouped, noted, wildlife)
+  if(!st || (!st.u && !st.grp && !st.nt && !st.w)){ hideHovertip(); return; }
+  tip.innerHTML=cellInfoHTML(c);
+  tip.classList.remove('hidden');
+  const oe = e.touches&&e.touches[0]?e.touches[0]:e;
+  const pad=14; let x=oe.clientX+pad, y=oe.clientY+pad;
+  const r=tip.getBoundingClientRect();
+  if(x+r.width>window.innerWidth-8) x=oe.clientX-r.width-pad;
+  if(y+r.height>window.innerHeight-8) y=oe.clientY-r.height-pad;
+  tip.style.left=x+'px'; tip.style.top=y+'px';
+}
+function hideHovertip(){ const t=document.getElementById('hovertip'); if(t) t.classList.add('hidden'); }
 
 mapEl.addEventListener('mousedown', e=>{ if(e.button===0) onDown(e); });
 window.addEventListener('mousemove', e=>{ onMove(e); onHover(e); });
 window.addEventListener('mouseup', onUp);
-mapEl.addEventListener('mouseleave', ()=>{ if(hoverId!=null){ hoverId=null; scheduleDraw(); } });
+mapEl.addEventListener('mouseleave', ()=>{ if(hoverId!=null){ hoverId=null; scheduleDraw(); } hideHovertip(); });
 mapEl.addEventListener('touchstart', e=>{ if(e.touches.length===1) onDown(e); }, {passive:false});
 mapEl.addEventListener('touchmove', e=>{ if(painting){ e.preventDefault(); onMove(e); } }, {passive:false});
 window.addEventListener('touchend', onUp);
@@ -447,11 +490,13 @@ document.getElementById('legendToggle').onclick=()=>{
 function setTool(t){
   tool=t;
   document.querySelectorAll('.tool').forEach(b=>b.classList.toggle('active', b.dataset.tool===t));
-  mapEl.classList.remove('tool-draw','tool-erase','tool-select');
-  if(t==='draw'||t==='erase'||t==='select') mapEl.classList.add('tool-'+t);
-  // brush control is relevant to all three editing tools
-  document.getElementById('brushctl').classList.toggle('hidden', !(t==='draw'||t==='erase'||t==='select'));
-  hoverId=null; scheduleDraw();
+  mapEl.classList.remove('tool-draw','tool-erase','tool-select','tool-pan');
+  mapEl.classList.add('tool-'+t);
+  // brush only matters when painting (draw / erase); it auto appears/disappears.
+  document.getElementById('brushctl').classList.toggle('hidden', !(t==='draw'||t==='erase'));
+  // in pan mode the map drags normally; editing tools capture the pointer.
+  if(t==='pan'){ map.dragging.enable(); }
+  hoverId=null; hideHovertip(); scheduleDraw();
 }
 document.querySelectorAll('.tool[data-tool]').forEach(b=>{
   b.onclick=()=>setTool(b.dataset.tool);
@@ -513,14 +558,39 @@ function updateStatusbar(){
   const n=selection.size;
   if(n===0){ sb.classList.add('hidden'); return; }
   sb.classList.remove('hidden');
-  document.getElementById('selCount').textContent = n+' cell'+(n>1?'s':'')+' selected';
+  const areaHa=(grid&&grid.cellAreaKm2||10)*100*n;
+  document.getElementById('selCount').textContent = n+' hex'+(n>1?'es':'')+' · '+fmtHa(areaHa);
 }
 document.getElementById('sbDone').onclick=()=>{ selection.clear(); selDirty=true; updateStatusbar(); scheduleDraw(); };
+// Clear use: removes only the land-use colour (keeps group / note / wildlife).
 document.getElementById('sbClear').onclick=()=>{
   const ids=[...selection];
   ids.forEach(id=>setLocal(id,{u:''}));
   api('/api/update','POST',{op:'clearUse', ids}).then(r=>{rev=r.rev;});
   renderLegend(); scheduleDraw();
+};
+// Delete: wipes everything for the selected cells (use, wildlife, group, note).
+document.getElementById('sbDelete').onclick=()=>{
+  const ids=[...selection];
+  if(!ids.length) return;
+  if(!confirm('Delete all data (use, wildlife, group, notes) for '+ids.length+' hex'+(ids.length>1?'es':'')+'?')) return;
+  ids.forEach(id=>setLocal(id,{u:'',w:0,grp:'',nt:''}));
+  api('/api/update','POST',{op:'delete', ids}).then(r=>{rev=r.rev;});
+  renderLegend(); scheduleDraw();
+};
+// Ungroup / dissolve: remove the group label from the selected cells (and, if
+// you selected a whole group, the entire group dissolves).
+document.getElementById('sbDissolve').onclick=()=>{
+  // expand selection to full groups so "dissolve" truly removes the group
+  const grps=new Set();
+  for(const id of selection){ const g=(state.get(id)||{}).grp; if(g) grps.add(g); }
+  if(!grps.size){ toast('No group in selection'); return; }
+  const ids=[];
+  for(const [id,st] of state){ if(st.grp && grps.has(st.grp)) ids.push(id); }
+  ids.forEach(id=>setLocal(id,{grp:''}));
+  api('/api/update','POST',{op:'group', ids, value:''}).then(r=>{rev=r.rev;});
+  toast('Dissolved '+grps.size+' group'+(grps.size>1?'s':''));
+  markDirty(); renderLegend(); scheduleDraw();
 };
 document.getElementById('sbGroup').onclick=()=>groupSheet();
 document.getElementById('sbNote').onclick=()=>noteSheet();
@@ -542,7 +612,7 @@ function toggleWildlifeSelection(){
 
 // ---------- sheets ----------
 const sheet=document.getElementById('sheet'), overlay=document.getElementById('sheetOverlay');
-function openSheet(html){ sheet.innerHTML=html; sheet.classList.remove('hidden'); overlay.classList.remove('hidden'); }
+function openSheet(html){ hideHovertip(); sheet.innerHTML=html; sheet.classList.remove('hidden'); overlay.classList.remove('hidden'); }
 function closeSheet(){ sheet.classList.add('hidden'); overlay.classList.add('hidden'); }
 overlay.onclick=closeSheet;
 
@@ -607,7 +677,6 @@ function openMenu(){
     </div>
     <div class="row">
       <button class="btn ghost" id="mHelp">How it works</button>
-      ${me&&me.owner?'<button class="btn ghost" id="mSecret">Change secret</button>':''}
       <button class="btn ghost" id="mLogout">Sign out</button>
     </div>`);
   document.getElementById('mVersions').onclick=versionsSheet;
@@ -615,8 +684,14 @@ function openMenu(){
   document.getElementById('mExportCsv').onclick=()=>{ window.location='/api/export?fmt=csv'; };
   document.getElementById('mExportGeo').onclick=()=>{ window.location='/api/export?fmt=geojson'; };
   document.getElementById('mHelp').onclick=helpSheet;
-  document.getElementById('mLogout').onclick=async()=>{ await api('/api/logout','POST',{}); location.reload(); };
-  const sb=document.getElementById('mSecret'); if(sb) sb.onclick=secretSheet;
+  document.getElementById('mLogout').onclick=doLogout;
+}
+
+async function doLogout(){
+  await api('/api/logout','POST',{});
+  // also clear any client-side mode state so the login sheet shows immediately
+  document.body.classList.remove('boma-mode','global-mode');
+  location.href='/';
 }
 
 function helpSheet(){
@@ -626,17 +701,20 @@ function helpSheet(){
       <b>Draw</b> — pick a use in the legend, then tap or drag to paint hexes. You can draw <i>anywhere</i> on the map — it snaps to the nearest hex.<br><br>
       <b>Rubber</b> — tap or drag to clear a hex's use.<br><br>
       <b>Brush size</b> — the dots next to the tools paint 1, 7, or 19 hexes at once.<br><br>
-      <b>Select</b> — tap a hex to grab its whole same-colour patch (magic wand), or drag to lasso. Shift-click works in any tool. Then group, annotate, recolour (tap a legend swatch) or clear them from the bottom bar.<br><br>
+      <b>Pan</b> — the ✋ tool moves the map around without editing. (You can also pan in any tool by dragging on empty space, and shift-drag selects.)<br><br>
+      <b>Select</b> — tap a hex to grab its whole same-colour patch (magic wand), or drag to lasso. Shift-click works in any tool. Then group, annotate, recolour (tap a legend swatch), <b>Clear use</b>, <b>Delete</b> (wipe everything), or <b>Ungroup</b> from the bottom bar.<br><br>
+      <b>Hover</b> — point at a hex to see its land use, area (ha), group, and notes.<br><br>
       <b>Find me</b> — the ◉ button top-right asks for your location and gently flashes the hex you're standing in.<br><br>
       <b>Layers</b> — tap the ◉ eye in the legend to hide/show a layer. <b>Wildlife range</b> is a separate overlay (the only layer with a bold outline) — select hexes then tap it in the legend to toggle. Grouped or wildlife cells <b>dissolve</b> into one region.<br><br>
-      Each hex ≈ <b>10&nbsp;km²</b>. Changes save automatically and everyone with the secret edits the same map.
+      <b>Versions</b> — every change autosaves. Open Versions to name one (keeps it) and share its link.<br><br>
+      Each hex ≈ <b>10&nbsp;km²</b> (1000&nbsp;ha). Changes save automatically and everyone with the same secret edits the same map.
     </div>
     <div class="row end"><button class="btn primary" onclick="this.closest('.sheet').classList.add('hidden');document.getElementById('sheetOverlay').classList.add('hidden')">Got it</button></div>`);
 }
 
 async function versionsSheet(){
-  openSheet(`<h2>Versions</h2><p class="sub">Save a named snapshot, share a link, or restore.</p>
-    <div class="codebox"><input type="text" id="verName" placeholder="Version name (e.g. Option B)">
+  openSheet(`<h2>Versions</h2><p class="sub">Every change is autosaved. Name a version to keep it, then share its link.</p>
+    <div class="codebox"><input type="text" id="verName" placeholder="Name this version (e.g. Option B)">
     <button class="btn primary" id="verSave">Save</button></div>
     <div id="verList" class="list"><div class="list-item"><div class="meta"><div class="s">Loading…</div></div></div></div>`);
   document.getElementById('verSave').onclick=async()=>{
@@ -654,11 +732,19 @@ async function loadVersions(){
   list.innerHTML='';
   for(const v of vs){
     const url=location.origin+'/?v='+v.token;
-    const item=document.createElement('div'); item.className='list-item';
-    item.innerHTML=`<div class="meta"><div class="t">${esc(v.name)}</div>
+    const auto=v.kind==='auto';
+    const item=document.createElement('div'); item.className='list-item'+(auto?' auto':'');
+    item.innerHTML=`<div class="meta"><div class="t">${esc(v.name)}${auto?' <span class=\"badge\">auto</span>':''}</div>
       <div class="s">${esc(v.author||'')} · ${fmtDate(v.created)}</div></div>
+      <button class="btn ghost mini" data-act="name">${auto?'Name':'Rename'}</button>
       <button class="btn ghost mini" data-act="share">Link</button>
       <button class="btn ghost mini" data-act="restore">Restore</button>`;
+    item.querySelector('[data-act="name"]').onclick=async()=>{
+      const nm=prompt(auto?'Name this autosaved version to keep it:':'Rename version:', auto?'':v.name);
+      if(nm==null) return; const t=nm.trim(); if(!t) return;
+      const rr=await api('/api/versions/'+v.token,'POST',{name:t});
+      if(rr&&rr.ok){ toast('Saved'); loadVersions(); } else toast('Failed');
+    };
     item.querySelector('[data-act="share"]').onclick=()=>{ copy(url); toast('Link copied'); };
     item.querySelector('[data-act="restore"]').onclick=async()=>{
       if(!confirm('Restore "'+v.name+'"? This replaces the current map.')) return;
@@ -694,50 +780,24 @@ function importSheet(){
   };
 }
 
-function secretSheet(){
-  openSheet(`<h2>Change secret</h2><p class="sub">Editors need this to access the map.</p>
-    <label>New secret</label><input type="text" id="secInput" placeholder="new shared secret">
-    <div class="row end"><button class="btn primary" id="secSave">Update</button></div>`);
-  document.getElementById('secSave').onclick=async()=>{
-    const v=document.getElementById('secInput').value.trim(); if(!v) return;
-    const r=await api('/api/reset-secret','POST',{secret:v});
-    if(r&&r.ok){ toast('Secret updated'); closeSheet(); }
-  };
-}
-
 // ---------- auth gate ----------
-function setupSheet(){
-  openSheet(`<h2>Set up your map</h2>
-    <p class="sub">You're the owner. Choose a secret to share with collaborators.</p>
-    <label>Map title</label><input type="text" id="suTitle" value="Land Use Zonation">
-    <label>Shared secret</label><input type="text" id="suSecret" placeholder="choose a secret phrase">
-    <label>Your editor name</label><input type="text" id="suName" placeholder="Owner">
-    <div class="row end"><button class="btn primary" id="suGo">Start mapping</button></div>`);
-  overlay.onclick=null;
-  document.getElementById('suGo').onclick=async()=>{
-    const secret=document.getElementById('suSecret').value.trim();
-    if(!secret){ toast('Pick a secret'); return; }
-    const title=document.getElementById('suTitle').value.trim();
-    const name=document.getElementById('suName').value.trim();
-    const r=await api('/api/setup','POST',{secret,title,name});
-    if(r&&r.ok){ closeSheet(); overlay.onclick=closeSheet; boot(); } else toast('Setup failed');
-  };
-}
 function loginSheet(){
-  openSheet(`<h2>${esc(me.title||'Land Use Zonation')}</h2>
-    <p class="sub">Enter the shared secret to join as an editor.</p>
-    <label>Secret</label><input type="password" id="liSecret" placeholder="shared secret">
+  openSheet(`<h2>${esc((me&&me.title)||'Land Use Zonation')}</h2>
+    <p class="sub">Enter your name and a secret to start.</p>
     <label>Your name <span style="font-weight:400">(optional — we'll pick one)</span></label>
     <input type="text" id="liName" placeholder="anonymous editor">
+    <label>Secret</label><input type="password" id="liSecret" placeholder="secret">
     <div class="row end"><button class="btn primary" id="liGo">Enter</button></div>`);
   overlay.onclick=null;
   const go=async()=>{
     const secret=document.getElementById('liSecret').value;
+    if(!secret.trim()){ toast('Enter a secret'); return; }
     const name=document.getElementById('liName').value.trim();
     const r=await api('/api/login','POST',{secret,name});
-    if(r&&r.ok){ closeSheet(); overlay.onclick=closeSheet; boot(); } else toast(r&&r.error||'Wrong secret');
+    if(r&&r.ok){ closeSheet(); overlay.onclick=closeSheet; boot(); } else toast(r&&r.error||'Could not sign in');
   };
   document.getElementById('liGo').onclick=go;
+  document.getElementById('liName').focus();
   document.getElementById('liSecret').addEventListener('keydown',e=>{if(e.key==='Enter')go();});
 }
 
@@ -788,12 +848,15 @@ function buildAdjacency(){
 
 async function boot(){
   me=await api('/api/me','GET');
-  if(!me.hasSecret){ // unconfigured
-    if(me.email && me.owner!==false){ setupSheet(); }
-    else { setupSheet(); } // first visitor sets it up
-    return;
-  }
   if(!me.authed){ loginSheet(); return; }
+  if(me.mode==='global'){ bootGlobal(); return; }
+  bootBoma();
+}
+
+// Boma mode: the full hex land-use editor over the seeded data.
+async function bootBoma(){
+  document.body.classList.remove('global-mode');
+  document.body.classList.add('boma-mode');
   document.getElementById('legendTitle').textContent='Land use';
   if(!grid) await loadGrid();
   sizeCanvas();
@@ -805,6 +868,51 @@ async function boot(){
   if(vtok){ loadSharedVersion(vtok); }
   scheduleDraw();
   renderLegend();
+}
+
+// Global mode: a blank world map you can pan / zoom and jump to a country.
+function bootGlobal(){
+  document.body.classList.remove('boma-mode');
+  document.body.classList.add('global-mode');
+  grid=null; state.clear();
+  map.setMinZoom(2); map.setMaxZoom(19);
+  map.setView([20,0], 2);
+  ctx && ctx.clearRect(0,0,map.getSize().x,map.getSize().y);
+  // a simple country search box
+  let bar=document.getElementById('countrybar');
+  if(!bar){
+    bar=document.createElement('div'); bar.id='countrybar'; bar.className='panel';
+    bar.innerHTML='<input type="text" id="countryInput" placeholder="Zoom to a country…" autocomplete="off"><div id="countryResults"></div>';
+    document.body.appendChild(bar);
+    const inp=bar.querySelector('#countryInput');
+    let t=null;
+    inp.addEventListener('input',()=>{ clearTimeout(t); t=setTimeout(()=>countrySearch(inp.value.trim()),300); });
+    inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){ clearTimeout(t); countrySearch(inp.value.trim()); } });
+  }
+  bar.style.display='';
+}
+
+async function countrySearch(q){
+  const box=document.getElementById('countryResults'); if(!box) return;
+  if(!q){ box.innerHTML=''; return; }
+  box.innerHTML='<div class="cr-item muted">Searching…</div>';
+  try{
+    const r=await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=6&q='+encodeURIComponent(q),{headers:{'Accept':'application/json'}});
+    const list=await r.json();
+    if(!list.length){ box.innerHTML='<div class="cr-item muted">No matches</div>'; return; }
+    box.innerHTML='';
+    for(const p of list){
+      const it=document.createElement('div'); it.className='cr-item';
+      it.textContent=p.display_name;
+      it.onclick=()=>{
+        box.innerHTML=''; document.getElementById('countryInput').value=p.display_name.split(',')[0];
+        if(p.boundingbox){ const b=p.boundingbox.map(Number);
+          map.fitBounds([[b[0],b[2]],[b[1],b[3]]],{padding:[20,20]});
+        } else map.setView([+p.lat,+p.lon],6);
+      };
+      box.appendChild(it);
+    }
+  }catch(e){ box.innerHTML='<div class="cr-item muted">Search failed</div>'; }
 }
 async function loadSharedVersion(tok){
   const r=await api('/api/versions/'+tok,'GET');
