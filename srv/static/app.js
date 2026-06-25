@@ -38,6 +38,14 @@ function markDirty(){ outlinesDirty=true; regionCache.set=null; }
 
 // per-layer visibility (use ids + '__wild' for the wildlife-range overlay)
 const hiddenLayers = new Set();
+// A hex has independent facets: a land use (colour), a wildlife-range overlay, and
+// a group. Each has its own visibility (land-use layers + the '__wild' overlay).
+// A cell is "visible" — i.e. drawable / selectable / outline-worthy — if ANY of its
+// facets is currently shown. This keeps the two-uses-per-hex case working: a hex
+// that is hidden grazing but visible wildlife range is still there.
+function useVisible(id){ const st=state.get(id); return !!(st && st.u && !hiddenLayers.has(st.u)); }
+function wildVisible(id){ const st=state.get(id); return !!(st && st.w && !hiddenLayers.has('__wild')); }
+function cellVisible(id){ return useVisible(id) || wildVisible(id); }
 
 // geolocation: subtly flash the hex the user is standing in
 let geoOn = false, geoWatchId = null, geoCellId = null, geoLatLng = null;
@@ -210,6 +218,9 @@ function computeOutline(ids){
 function rebuildOutlines(){
   const wild=[]; const groups=new Map();
   for(const [id,st] of state){
+    // outlines only trace cells that are actually visible (their use layer is on).
+    // hidden layers contribute no boundaries — nothing should be drawn for them.
+    if(!cellVisible(id)) continue;
     if(st.w) wild.push(id);
     if(st.grp){ let a=groups.get(st.grp); if(!a){a=[];groups.set(st.grp,a);} a.push(id); }
   }
@@ -242,7 +253,12 @@ function contiguousRegion(id){
 }
 function hoverPreview(){
   if(hoverId==null) return null;
-  if(tool==='select' && brushSize===1) return contiguousRegion(hoverId).segs;
+  // in select mode you can only grab visible hexes — don't preview hidden patches.
+  if(tool==='select'){
+    if(!cellVisible(hoverId)) return null;
+    if(brushSize===1) return contiguousRegion(hoverId).segs;
+    return computeOutline(brushCells(hoverId, brushSize).filter(cellVisible));
+  }
   return computeOutline(brushCells(hoverId, brushSize));
 }
 
@@ -314,11 +330,19 @@ let opAccum = {};      // op -> Set ids
 function applyToCell(c, isSelect, first){
   if(!c) return;
   if(isSelect || tool==='select'){
+    // you can only select what you can see: hidden layers are not selectable.
+    if(!cellVisible(c.id)){
+      // allow de-selecting a stray hidden cell that's already in the selection,
+      // but never add new hidden cells.
+      if(selection.has(c.id)){ selection.delete(c.id); selDirty=true; updateStatusbar(); scheduleDraw(); }
+      return;
+    }
     // magic-wand: a single tap (brush=1, not dragged) grabs the whole same-use patch;
     // dragging switches to plain per-hex lasso selection.
-    const ids = (first && brushSize===1)
+    const raw = (first && brushSize===1)
       ? [...contiguousRegion(c.id).set]
       : brushCells(c.id, brushSize);
+    const ids = raw.filter(cellVisible); // never pull in hidden cells
     // first cell of a drag decides whether we're adding or removing
     if(selectAction==null) selectAction = selection.has(c.id) ? 'remove' : 'add';
     for(const id of ids){ if(selectAction==='add') selection.add(id); else selection.delete(id); }
