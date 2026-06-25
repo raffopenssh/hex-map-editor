@@ -25,7 +25,7 @@ global lattice** — it works for any country / canvas, not just the seeded exte
   draw anywhere on Earth and it persists. A zoom-in hint appears when the view is
   too coarse to render the grid.
 - Empty (unassigned) cells are not drawn.
-- **Import / export** the whole hive as CSV or GeoJSON.
+- **Import / export** the whole hive as CSV or GPKG.
 - **Versions**: every edit is **autosaved** as a snapshot; name any version to
   keep it, share its `?v=<token>` link, or restore. Naming an autosave promotes
   it so it won't be pruned (last 50 autosaves are kept).
