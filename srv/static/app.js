@@ -978,6 +978,21 @@ function genGrid(west,south,east,north){
 // the grid is now a dynamic global lattice; Boma just starts focused on its data.
 let regenTimer=null;
 function scheduleRegen(){ clearTimeout(regenTimer); regenTimer=setTimeout(regenGlobalGrid,120); }
+
+// loading indicator for grid generation. Building a viewport's lattice (plus
+// adjacency) is synchronous and can block paint on slow devices/wide views, so
+// we show a spinner and let it actually render before doing the heavy work.
+function gridLoadEl(){
+  let el=document.getElementById('gridload');
+  if(!el){ el=document.createElement('div'); el.id='gridload';
+    el.innerHTML='<span class="spin"></span><span>Building hex grid…</span>';
+    document.body.appendChild(el); }
+  return el;
+}
+function showGridLoad(){ gridLoadEl().classList.add('show'); }
+function hideGridLoad(){ const el=document.getElementById('gridload'); if(el) el.classList.remove('show'); }
+
+let regenPending=false, gridLoadShown=false;
 function regenGlobalGrid(){
   if(!me) return;
   const hint=document.getElementById('zoomhint');
@@ -985,14 +1000,24 @@ function regenGlobalGrid(){
     grid=null; cellById=new Map();
     ctx && ctx.clearRect(0,0,map.getSize().x,map.getSize().y);
     if(hint) hint.classList.remove('hidden');
+    hideGridLoad();
     return;
   }
-  const b=map.getBounds().pad(0.2);
-  const g=genGrid(b.getWest(),b.getSouth(),b.getEast(),b.getNorth());
-  if(!g){ if(hint) hint.classList.remove('hidden'); return; }
-  if(hint) hint.classList.add('hidden');
-  installGrid(g);
-  scheduleDraw();
+  // show the spinner immediately; defer the (blocking) build to the next frame
+  // so the spinner paints first and the UI never feels frozen.
+  if(regenPending) return;
+  regenPending=true;
+  showGridLoad();
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    regenPending=false;
+    const b=map.getBounds().pad(0.2);
+    const g=genGrid(b.getWest(),b.getSouth(),b.getEast(),b.getNorth());
+    if(!g){ if(hint) hint.classList.remove('hidden'); hideGridLoad(); return; }
+    if(hint) hint.classList.add('hidden');
+    installGrid(g);
+    hideGridLoad();
+    scheduleDraw();
+  }));
 }
 
 // build hex adjacency from shared edges (vertices are exact across neighbours)
@@ -1012,8 +1037,32 @@ function buildAdjacency(){
 async function boot(){
   me=await api('/api/me','GET');
   if(!me.authed){ loginSheet(); return; }
+  // persist the view (centre+zoom) for this secret's map as the user pans/zooms,
+  // so re-entering with the same secret/link reopens exactly where they left off.
+  map.on('moveend', saveViewDebounced);
   if(me.mode==='global'){ bootGlobal(); return; }
   bootBoma();
+}
+
+// parse a stored view ({lat,lng,zoom}); returns null if absent/invalid.
+function parseView(v){
+  if(!v) return null;
+  try{ const o=typeof v==='string'?JSON.parse(v):v;
+    if(typeof o.lat==='number'&&typeof o.lng==='number'&&typeof o.zoom==='number') return o; }catch(e){}
+  return null;
+}
+// apply a saved view; returns true if one was applied.
+function applySavedView(v){ const o=parseView(v); if(!o) return false; map.setView([o.lat,o.lng], o.zoom); return true; }
+let saveViewTimer=null, lastViewKey='';
+function saveViewDebounced(){
+  clearTimeout(saveViewTimer);
+  saveViewTimer=setTimeout(()=>{
+    if(!me||!me.authed) return;
+    const c=map.getCenter(), z=map.getZoom();
+    const key=c.lat.toFixed(5)+','+c.lng.toFixed(5)+','+z;
+    if(key===lastViewKey) return; lastViewKey=key;
+    api('/api/view','POST',{lat:c.lat,lng:c.lng,zoom:z});
+  }, 600);
 }
 
 // Boma mode: the full hex land-use editor over the seeded data.
@@ -1032,9 +1081,9 @@ async function bootBoma(){
   }
   const st=await api('/api/state','GET');
   if(st&&st.cells) applyServerState(st);
-  // fit to the extent of the loaded data (cell ids encode lat/lon on the lattice),
-  // then generate the dynamic grid and keep it in sync on pan/zoom.
-  fitToData();
+  // restore the secret's last view if we have one; otherwise fit to the data
+  // extent (cell ids encode lat/lon on the lattice).
+  if(!applySavedView(me.view)) fitToData();
   regenGlobalGrid();
   map.on('moveend zoomend', scheduleRegen);
   // shared version view?
@@ -1059,7 +1108,7 @@ async function bootGlobal(){
   document.body.classList.add('global-mode');
   grid=null; cellById=new Map(); state.clear();
   map.setMinZoom(2); map.setMaxZoom(19);
-  map.setView([20,0], 2);
+  if(!applySavedView(me.view)) map.setView([20,0], 2);
   sizeCanvas(); setTool('pan');
   ctx && ctx.clearRect(0,0,map.getSize().x,map.getSize().y);
   // zoom-in hint shown when the viewport is too zoomed-out to draw the grid
@@ -1068,11 +1117,17 @@ async function bootGlobal(){
     h.textContent='Zoom in to draw the 10 km² hex grid';
     document.body.appendChild(h);
   }
-  // a blank canvas: regenerate the dynamic grid for the current view, then keep
-  // it in sync as the user pans / zooms. (Global mode shares the cell store with
-  // Boma, so we don't preload it here — it stays a clean drawing surface.)
+  // load this secret's own saved cells (each secret is a private, persistent
+  // map), then regenerate the dynamic grid and keep it in sync on pan/zoom.
+  const st=await api('/api/state','GET');
+  if(st&&st.cells) applyServerState(st);
+  // if there's no saved view but there IS prior data, fit to it on first entry.
+  if(!parseView(me.view) && state.size) fitToData();
   regenGlobalGrid();
   map.on('moveend zoomend', scheduleRegen);
+  // shared version link?
+  const vtok=new URLSearchParams(location.search).get('v');
+  if(vtok){ loadSharedVersion(vtok); }
   // a simple country search box
   let bar=document.getElementById('countrybar');
   if(!bar){
@@ -1142,6 +1197,9 @@ async function loadSharedVersion(tok){
     // preview the snapshot
     const backup=new Map(state);
     state.clear(); for(const [id,s] of Object.entries(r.cells)) state.set(Number(id),normSt(s));
+    // a shared link should reopen at the view the author saved with this version;
+    // fall back to fitting the snapshot's extent so it's never off-screen.
+    if(!applySavedView(r.view)) fitToData();
     renderLegend(); scheduleDraw();
     document.getElementById('svDismiss').onclick=()=>{ state=backup; renderLegend(); scheduleDraw(); closeSheet();
       history.replaceState({},'','/'); };

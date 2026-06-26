@@ -21,9 +21,17 @@ way — simplicity is the point.
   unique function of lattice row/col. `ungid`/`gidCentroid` invert it. The grid
   regenerates per viewport (`regenGlobalGrid`, debounced via `scheduleRegen`).
   Do **not** reintroduce a fixed finite grid file as the source of truth.
-- **Two modes**, chosen purely by the login secret (`modeForSecret`): `boma`
-  (seeded data, fits to its extent) and `global` (blank canvas, country search).
-  Both share one cell store and the same dynamic lattice.
+- **Per-secret maps.** `modeForSecret` maps each login secret to its own
+  private `mode`: the canonical phrase → `boma` (seeded data); every other
+  secret → a stable `s_<hash>` mode that is its own isolated cell store +
+  version list + saved view. (Legacy: an old build lumped all non-boma secrets
+  into one shared `global` mode; `claimLegacyGlobal` hands that data to the
+  first secret to log in after the change, once.) All maps share the dynamic
+  lattice; `global` mode is the blank-canvas UX (country search) used by the
+  `s_*` secrets.
+- **Saved view.** The map centre+zoom is persisted per secret (`view:<mode>`
+  meta, `/api/view`) and snapshotted with each version (`versions.view`), so a
+  re-login or a shared `?v=` link reopens exactly where the author was.
 - **Outlines** (`computeOutline`) dissolve shared inner edges; only outer
   boundaries are stroked. Land use is exclusive per cell; wildlife range is a
   separate overlay flag (`w`).

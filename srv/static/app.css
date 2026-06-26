@@ -133,6 +133,17 @@ body.global-mode #geoBtn{display:none!important}
   background:rgba(255,255,255,.92);border-radius:12px}
 #zoomhint.hidden{display:none}
 
+/* grid-building indicator: shown briefly while the hex lattice for the current
+   viewport is generated, so a heavy first render doesn't feel like a freeze */
+#gridload{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:1150;
+  display:flex;align-items:center;gap:10px;padding:11px 16px;font-size:13px;color:var(--ink);
+  background:rgba(255,255,255,.95);border-radius:12px;box-shadow:var(--shadow);pointer-events:none;
+  opacity:0;transition:opacity .15s ease}
+#gridload.show{opacity:1}
+#gridload .spin{width:16px;height:16px;border-radius:50%;border:2.5px solid #d7d9d2;
+  border-top-color:#3a7d5c;animation:gridspin .7s linear infinite}
+@keyframes gridspin{to{transform:rotate(360deg)}}
+
 @media (max-width:560px){
   #legend{max-width:46vw;font-size:12px}
   .tool .lbl{display:none}

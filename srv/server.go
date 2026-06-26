@@ -167,11 +167,42 @@ const (
 	modeGlobal = "global"
 )
 
+// Every distinct secret unlocks its OWN private map (its own cells + versions +
+// saved view). The canonical Boma phrase maps to the shared seeded map; any
+// other secret derives a stable, opaque mode from a hash of the secret so two
+// different secrets can never see, restore, or overwrite each other's work.
 func modeForSecret(secret string) string {
 	if secret == bomaSecret {
 		return modeBoma
 	}
-	return modeGlobal
+	sum := sha256.Sum256([]byte("landuse-mode:" + secret))
+	return "s_" + hex.EncodeToString(sum[:])[:16]
+}
+
+// claimLegacyGlobal migrates the old single shared 'global' map (cells + versions
+// + view) to the first non-boma secret that logs in after this change. Earlier
+// builds lumped all non-boma secrets into one 'global' mode; this hands that
+// existing work to its (sole active) owner exactly once, then never again.
+func (s *Server) claimLegacyGlobal(mode string) {
+	if mode == modeBoma || mode == modeGlobal {
+		return
+	}
+	if v, _ := s.getMeta("global_claimed"); v != "" {
+		return
+	}
+	var n int
+	_ = s.DB.QueryRow("SELECT COUNT(*) FROM cells WHERE mode=?", modeGlobal).Scan(&n)
+	var nv int
+	_ = s.DB.QueryRow("SELECT COUNT(*) FROM versions WHERE mode=?", modeGlobal).Scan(&nv)
+	if n == 0 && nv == 0 {
+		return
+	}
+	_, _ = s.DB.Exec("UPDATE cells SET mode=? WHERE mode=?", mode, modeGlobal)
+	_, _ = s.DB.Exec("UPDATE versions SET mode=? WHERE mode=?", mode, modeGlobal)
+	if v, ok := s.getMeta("view:" + modeGlobal); ok {
+		_ = s.setMeta("view:"+mode, v)
+	}
+	_ = s.setMeta("global_claimed", mode)
 }
 
 type identity struct {
@@ -272,6 +303,7 @@ func (s *Server) Serve(addr string) error {
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/state", s.handleState)
+	mux.HandleFunc("POST /api/view", s.handleViewSave)
 	mux.HandleFunc("POST /api/update", s.handleUpdate)
 	mux.HandleFunc("GET /api/versions", s.handleVersionsList)
 	mux.HandleFunc("POST /api/versions", s.handleVersionSave)
@@ -315,6 +347,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		"mode":   id.Mode,
 		"email":  id.Email,
 		"title":  firstNonEmpty(metaOr(s, "title"), "Land Use Zonation"),
+		"view":   metaOr(s, "view:"+id.Mode),
 	})
 }
 
@@ -348,6 +381,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mode := modeForSecret(body.Secret)
+	s.claimLegacyGlobal(mode)
 	name := strings.TrimSpace(body.Name)
 	if name == "" {
 		name = randomEditorName()
@@ -517,6 +551,28 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 // ---- versions ----
 
+// handleViewSave persists the caller's current map view (centre + zoom) for
+// their secret's map, so re-entering with that secret reopens where they left.
+func (s *Server) handleViewSave(w http.ResponseWriter, r *http.Request) {
+	id := s.identify(r)
+	if !id.Authed {
+		writeJSON(w, 401, map[string]string{"error": "auth required"})
+		return
+	}
+	var body struct {
+		Lat  float64 `json:"lat"`
+		Lng  float64 `json:"lng"`
+		Zoom float64 `json:"zoom"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "bad request"})
+		return
+	}
+	v, _ := json.Marshal(body)
+	_ = s.setMeta("view:"+id.Mode, string(v))
+	writeJSON(w, 200, map[string]string{"ok": "1"})
+}
+
 func (s *Server) handleVersionsList(w http.ResponseWriter, r *http.Request) {
 	id := s.identify(r)
 	if !id.Authed {
@@ -559,7 +615,7 @@ func (s *Server) handleVersionSave(w http.ResponseWriter, r *http.Request) {
 	}
 	data, _ := json.Marshal(cells)
 	tok := randToken(9)
-	_, err = s.DB.Exec("INSERT INTO versions(token,name,author,data,kind,mode) VALUES(?,?,?,?,'named',?)", tok, name, firstNonEmpty(id.Name, "Editor"), string(data), id.Mode)
+	_, err = s.DB.Exec("INSERT INTO versions(token,name,author,data,kind,mode,view) VALUES(?,?,?,?,'named',?,?)", tok, name, firstNonEmpty(id.Name, "Editor"), string(data), id.Mode, metaOr(s, "view:"+id.Mode))
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -614,7 +670,7 @@ func (s *Server) autosaveSnapshot(by, mode string) {
 	}
 	name := "Autosave " + time.Now().Format("Jan 2 15:04")
 	tok := randToken(9)
-	if _, err := s.DB.Exec("INSERT INTO versions(token,name,author,data,kind,mode) VALUES(?,?,?,?,'auto',?)", tok, name, firstNonEmpty(by, "Editor"), string(data), mode); err != nil {
+	if _, err := s.DB.Exec("INSERT INTO versions(token,name,author,data,kind,mode,view) VALUES(?,?,?,?,'auto',?,?)", tok, name, firstNonEmpty(by, "Editor"), string(data), mode, metaOr(s, "view:"+mode)); err != nil {
 		return
 	}
 	// prune: keep the most recent 50 autosaves per map
@@ -630,16 +686,20 @@ func (s *Server) handleVersionGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tok := r.PathValue("token")
-	var name, auth, data string
+	var name, auth, data, view string
 	var created time.Time
-	err := s.DB.QueryRow("SELECT name,COALESCE(author,''),data,created_at FROM versions WHERE token=? AND mode=?", tok, id.Mode).Scan(&name, &auth, &data, &created)
+	err := s.DB.QueryRow("SELECT name,COALESCE(author,''),data,COALESCE(view,''),created_at FROM versions WHERE token=? AND mode=?", tok, id.Mode).Scan(&name, &auth, &data, &view, &created)
 	if err != nil {
 		writeJSON(w, 404, map[string]string{"error": "not found"})
 		return
 	}
 	var cells map[string]cellState
 	_ = json.Unmarshal([]byte(data), &cells)
-	writeJSON(w, 200, map[string]interface{}{"name": name, "author": auth, "created": created.Format(time.RFC3339), "cells": cells})
+	out := map[string]interface{}{"name": name, "author": auth, "created": created.Format(time.RFC3339), "cells": cells}
+	if view != "" {
+		out["view"] = json.RawMessage(view)
+	}
+	writeJSON(w, 200, out)
 }
 
 func (s *Server) handleVersionRestore(w http.ResponseWriter, r *http.Request) {
