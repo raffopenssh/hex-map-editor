@@ -1096,7 +1096,8 @@ async function bootMap(){
   let bar=document.getElementById('countrybar');
   if(!bar){
     bar=document.createElement('div'); bar.id='countrybar'; bar.className='panel';
-    bar.innerHTML='<input type="text" id="countryInput" placeholder="Zoom to a country…" autocomplete="off"><div id="countryResults"></div>';
+    bar.innerHTML='<div class="cb-main"><input type="text" id="countryInput" placeholder="Zoom to a country…" autocomplete="off"><div id="countryResults"></div></div><button id="cbClose" title="Close search" aria-label="Close search">✕</button>';
+    bar.querySelector('#cbClose').addEventListener('click',()=>hideCountryBar());
     document.body.appendChild(bar);
     const inp=bar.querySelector('#countryInput');
     let t=null;

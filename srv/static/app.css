@@ -125,12 +125,16 @@ html,body{margin:0;height:100%;font-family:-apple-system,BlinkMacSystemFont,"Seg
 #countryResults .cr-item{padding:8px 10px;border-radius:8px;font-size:13px;cursor:pointer;color:var(--ink)}
 #countryResults .cr-item:hover{background:#f0efe9}
 #countryResults .cr-item.muted{color:var(--muted);cursor:default}
-/* global mode is now a full editor too — only the geolocation button stays hidden */
-body.global-mode #geoBtn{display:none!important}
-/* country search is a global-mode affordance only */
-#countryBtn{display:none;font-size:19px}
-body.global-mode #countryBtn{display:inline-flex;align-items:center;justify-content:center}
+/* the country search button lives next to the GPS button (flex siblings — no
+   overlap). Both are available on every map. */
+#countryBtn{font-size:19px;display:inline-flex;align-items:center;justify-content:center}
 #countrybar.hidden{display:none}
+/* a collapse (✕) button inside the search bar */
+#countrybar{display:flex;align-items:flex-start;gap:4px}
+#countrybar .cb-main{flex:1;min-width:0}
+#cbClose{flex:none;width:34px;height:34px;border:none;background:transparent;cursor:pointer;
+  color:var(--muted);font-size:18px;line-height:1;border-radius:8px}
+#cbClose:hover{background:#f0efe9;color:var(--ink)}
 /* zoom-in hint shown when the view is too coarse to render the grid */
 #zoomhint{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:1100;
   padding:10px 16px;font-size:14px;color:var(--muted);pointer-events:none;
