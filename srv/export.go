@@ -96,7 +96,7 @@ func sortedCellIDs(cells map[string]cellState) []int {
 
 // ---- GeoPackage (OGC) writer: a GeoPackage is a SQLite DB with the OGC schema ----
 
-func (s *Server) exportGeoPackage(w http.ResponseWriter, cells map[string]cellState) {
+func (s *Server) exportGeoPackage(w http.ResponseWriter, cells map[string]cellState, name string) {
 	f, err := os.CreateTemp("", "landuse-*.gpkg")
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -106,7 +106,7 @@ func (s *Server) exportGeoPackage(w http.ResponseWriter, cells map[string]cellSt
 	f.Close()
 	defer os.Remove(path)
 
-	if err := buildGeoPackage(path, cells); err != nil {
+	if err := buildGeoPackage(path, cells, name); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -116,18 +116,22 @@ func (s *Server) exportGeoPackage(w http.ResponseWriter, cells map[string]cellSt
 		return
 	}
 	w.Header().Set("Content-Type", "application/geopackage+sqlite3")
-	w.Header().Set("Content-Disposition", `attachment; filename="landuse.gpkg"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`.gpkg"`)
 	w.Write(data)
 }
 
-func buildGeoPackage(path string, cells map[string]cellState) error {
+func buildGeoPackage(path string, cells map[string]cellState, name string) error {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	const table = "land_use"
+	// the feature table / layer is named after the version being exported.
+	table := name
+	if table == "" {
+		table = "landuse"
+	}
 	stmts := []string{
 		`PRAGMA application_id = 1196444487;`, // 'GPKG'
 		`PRAGMA user_version = 10300;`,
@@ -227,8 +231,8 @@ func buildGeoPackage(path string, cells map[string]cellState) error {
 	}
 	if _, err := db.Exec(`INSERT INTO layer_styles
 		(f_table_catalog,f_table_schema,f_table_name,f_geometry_column,styleName,styleQML,styleSLD,useAsDefault,description,owner,ui)
-		VALUES('','', ?, 'geom', 'land_use', ?, '', 1, 'Categorized by land use', '', '')`,
-		table, styleQML()); err != nil {
+		VALUES('','', ?, 'geom', ?, ?, '', 1, 'Categorized by land use', '', '')`,
+		table, table, styleQML()); err != nil {
 		return err
 	}
 	return nil

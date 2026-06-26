@@ -717,6 +717,9 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmtq := r.URL.Query().Get("fmt")
+	// Name the download (and the GeoPackage layer) after the version currently
+	// being edited, sanitized to a safe base name.
+	name := exportBaseName(r.URL.Query().Get("name"))
 	_, cells, err := s.loadState(id.Mode)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
@@ -724,17 +727,45 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 	switch fmtq {
 	case "gpkg", "geopackage":
-		s.exportGeoPackage(w, cells)
+		s.exportGeoPackage(w, cells, name)
 	case "geojson":
-		s.exportGeoJSON(w, cells)
+		s.exportGeoJSON(w, cells, name)
 	default:
-		s.exportCSV(w, cells)
+		s.exportCSV(w, cells, name)
 	}
 }
 
-func (s *Server) exportCSV(w http.ResponseWriter, cells map[string]cellState) {
+// exportBaseName turns a (possibly empty/messy) version name into a safe base
+// name usable for both a download filename and a SQL/layer identifier. Falls
+// back to "landuse" when nothing usable remains.
+func exportBaseName(s string) string {
+	s = strings.TrimSpace(s)
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == ' ' || r == '-' || r == '_':
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	// collapse runs of underscores
+	for strings.Contains(out, "__") {
+		out = strings.ReplaceAll(out, "__", "_")
+	}
+	if out == "" {
+		return "landuse"
+	}
+	if len(out) > 64 {
+		out = out[:64]
+	}
+	return out
+}
+
+func (s *Server) exportCSV(w http.ResponseWriter, cells map[string]cellState, name string) {
 	w.Header().Set("Content-Type", "text/csv")
-	w.Header().Set("Content-Disposition", "attachment; filename=\"landuse.csv\"")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+name+".csv\"")
 	fmt.Fprintln(w, "cell_id,lat,lon,land_use,land_use_label,wildlife,group,note,area_ha")
 	for _, idn := range sortedCellIDs(cells) {
 		c := cells[strconv.Itoa(idn)]
@@ -756,9 +787,9 @@ func csvEsc(s string) string {
 }
 
 // exportGeoJSON builds polygons from the dynamic global lattice plus assignments.
-func (s *Server) exportGeoJSON(w http.ResponseWriter, cells map[string]cellState) {
+func (s *Server) exportGeoJSON(w http.ResponseWriter, cells map[string]cellState, name string) {
 	w.Header().Set("Content-Type", "application/geo+json")
-	w.Header().Set("Content-Disposition", "attachment; filename=\"landuse.geojson\"")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+name+".geojson\"")
 	w.Write([]byte(`{"type":"FeatureCollection","features":[`))
 	first := true
 	for _, id := range sortedCellIDs(cells) {

@@ -18,6 +18,7 @@ let grid = null;          // {cells:[{id,r,c,ct,g}], bounds}
 let cellById = new Map(); // id -> cell (with pre-split coords + bbox)
 let state = new Map();    // id -> {u,w,grp,nt}
 let rev = 0;
+let currentVersionName = '';   // name of the version being edited (for export filenames)
 let activeUse = 'grazing';
 let tool = 'draw';        // draw | erase | select
 let selection = new Set();// selected cell ids (for group/note/delete)
@@ -207,8 +208,10 @@ function computeOutline(ids){
   const set = ids instanceof Set ? ids : new Set(ids);
   const cnt=new Map(), geo=new Map();
   for(const id of set){
-    const c=cellById.get(id); if(!c) continue;
-    const g=c.g, n=g.length;
+    // geometry from the lattice, not the viewport grid: a cell just off-screen
+    // must still contribute its (shared) edges so interior boundaries dissolve.
+    const c=cellById.get(id);
+    const g=c? c.g : gidPoly(id), n=g.length;
     for(let i=0;i<n;i++){
       const a=g[i], bb=g[(i+1)%n], k=ekey(a,bb);
       cnt.set(k,(cnt.get(k)||0)+1);
@@ -728,6 +731,9 @@ function noteSheet(){
   };
 }
 
+// pass the current version name so exported files (and the GeoPackage layer)
+// share that name; the server sanitizes it.
+function exportNameParam(){ return currentVersionName ? '&name='+encodeURIComponent(currentVersionName) : ''; }
 function openMenu(){
   openSheet(`<h2>${esc(me&&me.title||'Land Use Zonation')}</h2>
     <p class="sub">Signed in as <b>${esc(me&&me.name||'—')}</b>${me&&me.owner?' · owner':''}</p>
@@ -745,8 +751,8 @@ function openMenu(){
     </div>`);
   document.getElementById('mVersions').onclick=versionsSheet;
   document.getElementById('mImport').onclick=importSheet;
-  document.getElementById('mExportCsv').onclick=()=>{ window.location='/api/export?fmt=csv'; };
-  document.getElementById('mExportGpkg').onclick=()=>{ window.location='/api/export?fmt=gpkg'; };
+  document.getElementById('mExportCsv').onclick=()=>{ window.location='/api/export?fmt=csv'+exportNameParam(); };
+  document.getElementById('mExportGpkg').onclick=()=>{ window.location='/api/export?fmt=gpkg'+exportNameParam(); };
   document.getElementById('mHelp').onclick=helpSheet;
   document.getElementById('mLogout').onclick=doLogout;
 }
@@ -784,7 +790,7 @@ async function versionsSheet(){
   document.getElementById('verSave').onclick=async()=>{
     const name=document.getElementById('verName').value.trim();
     const r=await api('/api/versions','POST',{name});
-    if(r&&r.token){ toast('Saved'); document.getElementById('verName').value=''; loadVersions(); }
+    if(r&&r.token){ if(name) currentVersionName=name; toast('Saved'); document.getElementById('verName').value=''; loadVersions(); }
   };
   loadVersions();
 }
@@ -807,13 +813,13 @@ async function loadVersions(){
       const nm=prompt(auto?'Name this autosaved version to keep it:':'Rename version:', auto?'':v.name);
       if(nm==null) return; const t=nm.trim(); if(!t) return;
       const rr=await api('/api/versions/'+v.token,'POST',{name:t});
-      if(rr&&rr.ok){ toast('Saved'); loadVersions(); } else toast('Failed');
+      if(rr&&rr.ok){ if(currentVersionName===v.name) currentVersionName=t; toast('Saved'); loadVersions(); } else toast('Failed');
     };
     item.querySelector('[data-act="share"]').onclick=()=>{ copy(url); toast('Link copied'); };
     item.querySelector('[data-act="restore"]').onclick=async()=>{
       if(!confirm('Restore "'+v.name+'"? This replaces the current map.')) return;
       const rr=await api('/api/versions/'+v.token+'/restore','POST',{});
-      if(rr&&rr.cells){ applyServerState(rr); toast('Restored'); closeSheet(); }
+      if(rr&&rr.cells){ applyServerState(rr); currentVersionName=v.name||''; toast('Restored'); closeSheet(); }
     };
     list.appendChild(item);
   }
@@ -930,6 +936,23 @@ function gid(r,c){ return (c+16384)*40000 + (r+16384); }
 function ungid(id){ return {r:(id%40000)-16384, c:Math.floor(id/40000)-16384}; }
 // centroid lon/lat of a cell id on the global lattice
 function gidCentroid(id){ const {r,c}=ungid(id); const shift=(c&1)?DLAT/2:0; return [c*DLON, -(r*DLAT)-shift]; }
+// Canonical hex vertices for lattice cell (r,c). The trick: express every vertex
+// on an INTEGER sub-lattice (x = DLON*mx/3, y = halfH*my) so that a vertex shared
+// by two neighbouring cells is computed from the SAME integers in both — making
+// the floats bit-identical. Computing x/y independently and rounding (the old
+// approach) let vertices on a .5 boundary diverge by 1 ULP, so shared interior
+// edges failed to dissolve and produced U-shaped boundary artefacts.
+const HALFH=DLAT/2;
+function hexVerts(r,c){
+  const odd=(c&1)?1:0, cy=-(2*r+odd);   // integer y index of the centre
+  const m=3*c;                          // integer x index of the centre (×1/3 DLON)
+  // [mx,my] integer indices → world coords. R=DLON/1.5 ⇒ mx spans ±2; halfR ⇒ ±1.
+  const idx=[[m-2,cy],[m-1,cy+1],[m+1,cy+1],[m+2,cy],[m+1,cy-1],[m-1,cy-1]];
+  return idx.map(([mx,my])=>[DLON*mx/3, HALFH*my]);
+}
+// hex polygon for a cell id, computed straight from the lattice (NOT the viewport
+// grid) so outlines dissolve correctly even when a region extends off-screen.
+function gidPoly(id){ const {r,c}=ungid(id); return hexVerts(r,c); }
 function genGrid(west,south,east,north){
   const R=DLON/1.5, halfR=R/2, halfH=DLAT/2;
   const w=west-DLON*2, e=east+DLON*2, s=south-DLAT*2, n=north+DLAT*2;
@@ -942,9 +965,9 @@ function genGrid(west,south,east,north){
     const rmin=Math.floor((-n-shift)/DLAT), rmax=Math.ceil((-s-shift)/DLAT);
     for(let r=rmin;r<=rmax;r++){
       const y=-(r*DLAT)-shift;
-      const g=[[rnd(x-R),rnd(y)],[rnd(x-halfR),rnd(y+halfH)],[rnd(x+halfR),rnd(y+halfH)],
-              [rnd(x+R),rnd(y)],[rnd(x+halfR),rnd(y-halfH)],[rnd(x-halfR),rnd(y-halfH)]];
-      cells.push({id:gid(r,c),r,c,ct:[rnd(x),rnd(y)],g});
+      // shared vertices must be bit-identical across neighbours → use the integer
+      // sub-lattice vertex generator (see hexVerts). Don't round here.
+      cells.push({id:gid(r,c),r,c,ct:[rnd(x),rnd(y)],g:hexVerts(r,c)});
     }
   }
   const latc=(s+n)/2;
@@ -1070,22 +1093,42 @@ async function countrySearch(q){
   if(!q){ box.innerHTML=''; return; }
   box.innerHTML='<div class="cr-item muted">Searching…</div>';
   try{
-    const r=await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=6&q='+encodeURIComponent(q),{headers:{'Accept':'application/json'}});
-    const list=await r.json();
+    // restrict to countries so the list shows clean country names only.
+    const r=await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=6&featureType=country&accept-language=en&q='+encodeURIComponent(q),{headers:{'Accept':'application/json','Accept-Language':'en'}});
+    let list=await r.json();
+    // belt & suspenders: keep only country-level hits.
+    list=list.filter(p=>p.addresstype==='country'||p.type==='country'||(p.class==='boundary'&&p.addresstype==='country'));
     if(!list.length){ box.innerHTML='<div class="cr-item muted">No matches</div>'; return; }
     box.innerHTML='';
     for(const p of list){
+      const name=p.name || p.display_name.split(',')[0];
       const it=document.createElement('div'); it.className='cr-item';
-      it.textContent=p.display_name;
-      it.onclick=()=>{
-        box.innerHTML=''; document.getElementById('countryInput').value=p.display_name.split(',')[0];
+      it.textContent=name;                       // country name only
+      // Pick a result: jump there, collapse the search, and drop straight into
+      // Draw mode. Use pointerup (works for mouse AND touch) instead of click,
+      // which mobile browsers can swallow when the input still holds focus.
+      const pick=(ev)=>{
+        if(ev){ ev.preventDefault(); ev.stopPropagation(); }
         if(p.boundingbox){ const b=p.boundingbox.map(Number);
           map.fitBounds([[b[0],b[2]],[b[1],b[3]]],{padding:[20,20]});
         } else map.setView([+p.lat,+p.lon],6);
+        collapseCountryBar(name);
+        setTool('draw');
+        toast('Draw mode · paint land use on '+name);
       };
+      it.addEventListener('pointerup',pick);
+      // Safari/iOS fallback when Pointer Events are flaky.
+      it.addEventListener('touchend',pick,{passive:false});
+      it.addEventListener('click',pick);
       box.appendChild(it);
     }
   }catch(e){ box.innerHTML='<div class="cr-item muted">Search failed</div>'; }
+}
+// hide the country search results + blur the input so the bar gets out of the way.
+function collapseCountryBar(name){
+  const box=document.getElementById('countryResults'); if(box) box.innerHTML='';
+  const inp=document.getElementById('countryInput');
+  if(inp){ inp.value=name||''; inp.blur(); }
 }
 async function loadSharedVersion(tok){
   const r=await api('/api/versions/'+tok,'GET');
@@ -1104,7 +1147,7 @@ async function loadSharedVersion(tok){
       history.replaceState({},'','/'); };
     document.getElementById('svRestore').onclick=async()=>{
       const rr=await api('/api/versions/'+tok+'/restore','POST',{});
-      if(rr&&rr.cells){ applyServerState(rr); toast('Restored'); closeSheet(); history.replaceState({},'','/'); }
+      if(rr&&rr.cells){ applyServerState(rr); currentVersionName=r.name||''; toast('Restored'); closeSheet(); history.replaceState({},'','/'); }
     };
   }
 }
