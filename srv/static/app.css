@@ -162,6 +162,8 @@ html,body{margin:0;height:100%;font-family:-apple-system,BlinkMacSystemFont,"Seg
 @keyframes gridspin{to{transform:rotate(360deg)}}
 
 @media (max-width:560px){
+  /* The ⋯ More button already opens the same menu, so the hamburger is redundant. */
+  #accountBtn{display:none}
   #legend{max-width:46vw;font-size:12px}
   .tool .lbl{display:none}
   .tool{min-width:42px;padding:9px}
