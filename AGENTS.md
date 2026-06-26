@@ -42,6 +42,41 @@ way — simplicity is the point.
 - **Persistence**: edits batch through `/api/update`; every change autosaves a
   version snapshot. Cell ids in the DB are lattice gids.
 
+## Feature map (grep these symbols — don't re-read the whole app)
+Client (`app.js`):
+- **Toolbar / tools**: `setTool`; buttons in `index.html` `#toolbar` (pan/draw/
+  erase/select, undo/redo, more). Tool wiring `.tool[data-tool]`.
+- **Painting**: `onDown`/`onMove`/`onUp` (mouse+touch, NOT pointer events),
+  `applyToCell`, `brushCells`. Local edits via `setLocal`; server batch via
+  `queueOp`/`flushOps` → `/api/update`.
+- **Undo/redo**: `undoStack`/`redoStack`, `pushHistory`, `editCells` (wraps a
+  selection/menu edit into one history step + server sync), `syncSnapToServer`,
+  `snapOne`/`snapCells`. Paint strokes capture `strokeBefore` in `onDown`/`onUp`.
+  Any new mutation MUST go through `editCells` (selection/menu) or set
+  `strokeBefore` (paint) so it's undoable. Ctrl/⌘+Z / +Shift+Z / +Y bound in the
+  global `keydown`.
+- **Selection bar**: `#statusbar` buttons `sb*` (Group/Ungroup/Note/Clear/Delete/
+  Deselect — `sbDone` just clears selection). `recolorSelection`,
+  `toggleWildlifeSelection`, `groupSheet`, `noteSheet`.
+- **Search**: `showCountryBar`/`countrySearch` (Nominatim free-form geocode:
+  countries, cities, addresses). Centred on mobile via `#countrybar` media query.
+- **GPX overlay**: `parseGPX`/`setGPX`/`clearGPX`/`gpxSheet`, menu item `#mGpx`.
+  Drawn in Leaflet pane `gpxPane` (z 350, below the hex canvas at z 400,
+  `pointerEvents:none`) as a white halo + thin dark line — a non-interactive
+  reference, removed only via menu → GPX track… → Remove track.
+- **Menu/sheets**: `openMenu`, `versionsSheet`/`loadVersions`, `importSheet`,
+  `helpSheet`. Sheets via `openSheet`/`closeSheet`.
+- **Boot**: `boot` → `bootMap`; data load `/api/state` → `applyServerState`.
+
+Server (`server.go`):
+- **Edits**: `handleUpdate` (`/api/update`, ops setUse|clearUse|setWildlife|
+  group|note|delete). `loadState`/`replaceAll`, `cellState`.
+- **Versions/autosave**: `scheduleAutosave`→`autosaveSnapshot` (debounced, FULL
+  all-time history — no pruning). Each autosave is named by `summarizeEdit`
+  (diffs prev→curr into an edit-event label like "Hunting +3 · Wildlife range
+  −1"). `handleVersionsList/Save/Get/Rename/Restore`. Palette/labels shared with
+  export in `export.go` (`landUses`, `useLabel`; `lbl` adds an id fallback).
+
 ## Conventions
 - Frontend is dependency-light (Leaflet from CDN). Don't add a bundler/npm.
 - Server: `go build -o landuse-srv ./cmd/srv`. SQLite via the existing helpers.
@@ -51,6 +86,11 @@ way — simplicity is the point.
 ## Run / test
     make build && ./landuse-srv -listen :8000
     # log in with secret `boma@250626` (data) or anything else (blank global)
+- In this deployment a **systemd unit `landuse`** owns port 8000 and runs the
+  built binary from `/home/exedev/landuse`. After `make build`, reload with
+  `sudo systemctl restart landuse` (a manual `./landuse-srv` will fight it).
+- Edits **autosave immediately** — there is no "Done/commit" step. The bottom-
+  bar `Deselect` only clears the selection. Undo/redo is the safety net.
 
 ## Gotchas
 - App state lives inside the `app.js` IIFE — it is **not** on `window`, so you

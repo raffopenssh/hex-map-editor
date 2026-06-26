@@ -23,6 +23,7 @@ let activeUse = 'grazing';
 let tool = 'draw';        // draw | erase | select
 let selection = new Set();// selected cell ids (for group/note/delete)
 let painting = false, paintSelect=false, lastPainted=null;
+let strokeBefore = null;   // id -> pre-edit snapshot, captured during a paint stroke (for undo)
 let brushSize = 1;        // 1 = single hex, 2 = +ring, 3 = +2 rings
 let hoverId = null;       // cell under pointer (desktop brush preview)
 let dragMoved = false;    // pointer moved across cells since down
@@ -62,6 +63,13 @@ L.control.attribution({position:'bottomright', prefix:false})
   .addAttribution('© OpenStreetMap, © CARTO').addTo(map);
 L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
   {subdomains:'abcd', maxZoom:19}).addTo(map);
+
+// dedicated pane for uploaded GPX tracks: sits ABOVE tiles but BELOW the hex
+// canvas (z 400), so a route reads as a subtle dark line under the land-use fills.
+map.createPane('gpxPane');
+map.getPane('gpxPane').style.zIndex=350;
+map.getPane('gpxPane').style.pointerEvents='none';
+let gpxLayer=null, gpxName='';
 
 // custom canvas hex layer (manually redrawn, fixed to viewport)
 const canvas = document.createElement('canvas');
@@ -360,10 +368,10 @@ function applyToCell(c, isSelect, first){
   }
   const ids = brushCells(c.id, brushSize);
   if(tool==='draw'){
-    for(const id of ids){ setLocal(id,{u:activeUse}); selection.add(id); queueOp('setUse', id, activeUse); }
+    for(const id of ids){ if(strokeBefore&&!strokeBefore.has(id)) strokeBefore.set(id, snapOne(id)); setLocal(id,{u:activeUse}); selection.add(id); queueOp('setUse', id, activeUse); }
     selDirty=true;
   } else if(tool==='erase'){
-    for(const id of ids){ setLocal(id,{u:''}); selection.delete(id); queueOp('clearUse', id, ''); }
+    for(const id of ids){ if(strokeBefore&&!strokeBefore.has(id)) strokeBefore.set(id, snapOne(id)); setLocal(id,{u:''}); selection.delete(id); queueOp('clearUse', id, ''); }
     selDirty=true;
   }
   updateStatusbar(); scheduleDraw();
@@ -406,6 +414,70 @@ async function flushOps(){
   }
 }
 
+// ---------- undo / redo ----------
+// Edits autosave immediately (no "Done" to commit), so undo/redo is the safety
+// net. Each history entry is a pair of {id -> cellState|null} maps captured
+// before and after a logical change (one paint stroke, or one selection action).
+let undoStack=[], redoStack=[];
+const HIST_MAX=120;
+function snapOne(id){ const s=state.get(id); return s?Object.assign({},s):null; }
+function snapCells(ids){ const m=new Map(); for(const id of ids) m.set(Number(id), snapOne(Number(id))); return m; }
+function sameSnap(a,b){ a=a||null; b=b||null; if(a===b) return true; if(!a||!b) return false;
+  return (a.u||'')===(b.u||'') && (a.w?1:0)===(b.w?1:0) && (a.grp||'')===(b.grp||'') && (a.nt||'')===(b.nt||''); }
+function pushHistory(before, after){
+  // drop cells that didn't actually change
+  let changed=false;
+  for(const [id,b] of before){ if(!sameSnap(b, after.get(id))){ changed=true; break; } }
+  if(!changed) return;
+  undoStack.push({before, after});
+  if(undoStack.length>HIST_MAX) undoStack.shift();
+  redoStack.length=0; updateHistButtons();
+}
+function applySnap(m){
+  for(const [id,s] of m){ if(!s) state.delete(Number(id)); else state.set(Number(id), Object.assign({},s)); }
+  markDirty(); selDirty=true; renderLegend(); updateStatusbar(); scheduleDraw();
+  syncSnapToServer(m);
+}
+// push a target state for a batch of cells to the server, reusing the existing
+// granular ops. Cells with an identical target are grouped into one request.
+async function syncSnapToServer(m){
+  const buckets=new Map();
+  for(const [id,s] of m){
+    const key = s ? ['u',s.u||'','w',s.w?1:0,'g',s.grp||'','n',s.nt||''].join('\u0001') : '\u0000null';
+    let b=buckets.get(key); if(!b){ b={s, ids:[]}; buckets.set(key,b); } b.ids.push(Number(id));
+  }
+  for(const {s,ids} of buckets.values()){
+    try{
+      if(!s){ const r=await api('/api/update','POST',{op:'delete', ids}); if(r&&r.rev)rev=r.rev; continue; }
+      let r;
+      if(s.u) r=await api('/api/update','POST',{op:'setUse', ids, value:s.u});
+      else    r=await api('/api/update','POST',{op:'clearUse', ids});
+      if(r&&r.rev)rev=r.rev;
+      r=await api('/api/update','POST',{op:'setWildlife', ids, flag:!!s.w});
+      r=await api('/api/update','POST',{op:'group', ids, value:s.grp||''});
+      r=await api('/api/update','POST',{op:'note', ids, value:s.nt||''});
+      if(r&&r.rev)rev=r.rev;
+    }catch(err){ toast('Save failed'); }
+  }
+}
+function undo(){ const e=undoStack.pop(); if(!e) return; redoStack.push(e); applySnap(e.before); updateHistButtons(); toast('Undone'); }
+function redo(){ const e=redoStack.pop(); if(!e) return; undoStack.push(e); applySnap(e.after); updateHistButtons(); toast('Redone'); }
+function updateHistButtons(){
+  const u=document.getElementById('undoBtn'), r=document.getElementById('redoBtn');
+  if(u) u.disabled=!undoStack.length;
+  if(r) r.disabled=!redoStack.length;
+}
+// run a selection/menu edit so it records one undo step. `mutate` only touches
+// local state (via setLocal); the server sync is handled here centrally.
+function editCells(ids, mutate){
+  ids=[...new Set(ids.map(Number))]; if(!ids.length) return;
+  const before=snapCells(ids);
+  mutate();
+  const after=snapCells(ids);
+  pushHistory(before, after);
+  syncSnapToServer(after);
+}
+
 // pointer events
 function onDown(e){
   if(!grid||!me||!me.authed) return;
@@ -417,6 +489,7 @@ function onDown(e){
   const c = pickCell(eventLatLng(e));
   if(!c){ return; }
   painting=true; paintSelect=isSelect; lastPainted=c.id; downCell=c.id; dragMoved=false;
+  strokeBefore = (!isSelect && (tool==='draw'||tool==='erase')) ? new Map() : null;
   selectAction=null;
   map.dragging.disable();
   e.preventDefault();
@@ -431,7 +504,11 @@ function onMove(e){
   }
 }
 function onUp(){
-  if(painting){ painting=false; map.dragging.enable(); selectAction=null; flushOps(); renderLegend(); }
+  if(painting){
+    painting=false; map.dragging.enable(); selectAction=null; flushOps(); renderLegend();
+    if(strokeBefore && strokeBefore.size){ pushHistory(strokeBefore, snapCells([...strokeBefore.keys()])); }
+    strokeBefore=null;
+  }
 }
 // desktop hover preview for brush / magic-wand + info tooltip
 function onHover(e){
@@ -580,6 +657,14 @@ document.querySelectorAll('.bz[data-bz]').forEach(b=>{
     scheduleDraw();
   };
 });
+document.getElementById('undoBtn').onclick=undo;
+document.getElementById('redoBtn').onclick=redo;
+document.addEventListener('keydown',e=>{
+  if(!(e.ctrlKey||e.metaKey)) return;
+  const tag=(e.target&&e.target.tagName)||''; if(tag==='INPUT'||tag==='TEXTAREA') return;
+  if(e.key==='z'||e.key==='Z'){ e.preventDefault(); (e.shiftKey?redo:undo)(); }
+  else if(e.key==='y'||e.key==='Y'){ e.preventDefault(); redo(); }
+});
 document.getElementById('menuBtn').onclick=openMenu;
 document.getElementById('accountBtn').onclick=openMenu;
 document.getElementById('countryBtn').onclick=showCountryBar;
@@ -636,9 +721,7 @@ function updateStatusbar(){
 document.getElementById('sbDone').onclick=()=>{ selection.clear(); selDirty=true; updateStatusbar(); scheduleDraw(); };
 // Clear use: removes only the land-use colour (keeps group / note / wildlife).
 document.getElementById('sbClear').onclick=()=>{
-  const ids=[...selection];
-  ids.forEach(id=>setLocal(id,{u:''}));
-  api('/api/update','POST',{op:'clearUse', ids}).then(r=>{rev=r.rev;});
+  editCells([...selection], ()=>{ for(const id of selection) setLocal(id,{u:''}); });
   renderLegend(); scheduleDraw();
 };
 // Delete: wipes everything for the selected cells (use, wildlife, group, note).
@@ -646,8 +729,7 @@ document.getElementById('sbDelete').onclick=()=>{
   const ids=[...selection];
   if(!ids.length) return;
   if(!confirm('Delete all data (use, wildlife, group, notes) for '+ids.length+' hex'+(ids.length>1?'es':'')+'?')) return;
-  ids.forEach(id=>setLocal(id,{u:'',w:0,grp:'',nt:''}));
-  api('/api/update','POST',{op:'delete', ids}).then(r=>{rev=r.rev;});
+  editCells(ids, ()=>{ ids.forEach(id=>setLocal(id,{u:'',w:0,grp:'',nt:''})); });
   renderLegend(); scheduleDraw();
 };
 // Ungroup: remove the group label from exactly the selected cells. Predictable
@@ -655,8 +737,7 @@ document.getElementById('sbDelete').onclick=()=>{
 document.getElementById('sbDissolve').onclick=()=>{
   const ids=[...selection].filter(id=>(state.get(id)||{}).grp);
   if(!ids.length){ toast('No grouped hexes in selection'); return; }
-  ids.forEach(id=>setLocal(id,{grp:''}));
-  api('/api/update','POST',{op:'group', ids, value:''}).then(r=>{rev=r.rev;});
+  editCells(ids, ()=>{ ids.forEach(id=>setLocal(id,{grp:''})); });
   toast('Ungrouped '+ids.length+' hex'+(ids.length>1?'es':''));
   markDirty(); renderLegend(); scheduleDraw();
 };
@@ -665,16 +746,14 @@ document.getElementById('sbNote').onclick=()=>noteSheet();
 
 function recolorSelection(use){
   const ids=[...selection];
-  ids.forEach(id=>setLocal(id,{u:use}));
-  api('/api/update','POST',{op:'setUse', ids, value:use}).then(r=>{rev=r.rev;});
+  editCells(ids, ()=>{ ids.forEach(id=>setLocal(id,{u:use})); });
   renderLegend(); scheduleDraw();
 }
 function toggleWildlifeSelection(){
   const ids=[...selection]; if(!ids.length) return;
   let allWild=true; for(const id of ids){ if(!(state.get(id)||{}).w){ allWild=false; break; } }
   const flag=!allWild;
-  ids.forEach(id=>setLocal(id,{w:flag?1:0}));
-  api('/api/update','POST',{op:'setWildlife', ids, flag}).then(r=>{rev=r.rev;});
+  editCells(ids, ()=>{ ids.forEach(id=>setLocal(id,{w:flag?1:0})); });
   renderLegend(); updateStatusbar(); scheduleDraw();
 }
 
@@ -698,13 +777,11 @@ function groupSheet(){
   document.getElementById('grpInput').focus();
   document.getElementById('grpSave').onclick=()=>{
     const v=document.getElementById('grpInput').value.trim();
-    ids.forEach(id=>setLocal(id,{grp:v}));
-    api('/api/update','POST',{op:'group', ids, value:v}).then(r=>{rev=r.rev;});
+    editCells(ids, ()=>{ ids.forEach(id=>setLocal(id,{grp:v})); });
     closeSheet(); toast('Grouped'); scheduleDraw();
   };
   document.getElementById('grpClear').onclick=()=>{
-    ids.forEach(id=>setLocal(id,{grp:''}));
-    api('/api/update','POST',{op:'group', ids, value:''}).then(r=>{rev=r.rev;});
+    editCells(ids, ()=>{ ids.forEach(id=>setLocal(id,{grp:''})); });
     closeSheet(); scheduleDraw();
   };
 }
@@ -721,13 +798,11 @@ function noteSheet(){
   document.getElementById('noteInput').focus();
   document.getElementById('noteSave').onclick=()=>{
     const v=document.getElementById('noteInput').value;
-    ids.forEach(id=>setLocal(id,{nt:v}));
-    api('/api/update','POST',{op:'note', ids, value:v}).then(r=>{rev=r.rev;});
+    editCells(ids, ()=>{ ids.forEach(id=>setLocal(id,{nt:v})); });
     closeSheet(); toast('Note saved'); scheduleDraw();
   };
   document.getElementById('noteClear').onclick=()=>{
-    ids.forEach(id=>setLocal(id,{nt:''}));
-    api('/api/update','POST',{op:'note', ids, value:''}).then(r=>{rev=r.rev;});
+    editCells(ids, ()=>{ ids.forEach(id=>setLocal(id,{nt:''})); });
     closeSheet();
   };
 }
@@ -743,6 +818,9 @@ function openMenu(){
     </div>
     <div class="row">
       <button class="btn ghost" id="mImport">Import…</button>
+      <button class="btn ghost" id="mGpx">${gpxLayer?'GPX track…':'Load GPX…'}</button>
+    </div>
+    <div class="row">
       <button class="btn ghost" id="mExportCsv">Export CSV</button>
       <button class="btn ghost" id="mExportGpkg">Export GeoPackage</button>
     </div>
@@ -752,6 +830,7 @@ function openMenu(){
     </div>`);
   document.getElementById('mVersions').onclick=versionsSheet;
   document.getElementById('mImport').onclick=importSheet;
+  document.getElementById('mGpx').onclick=gpxSheet;
   document.getElementById('mExportCsv').onclick=()=>{ window.location='/api/export?fmt=csv'+exportNameParam(); };
   document.getElementById('mExportGpkg').onclick=()=>{ window.location='/api/export?fmt=gpkg'+exportNameParam(); };
   document.getElementById('mHelp').onclick=helpSheet;
@@ -824,6 +903,63 @@ async function loadVersions(){
     };
     list.appendChild(item);
   }
+}
+
+// ---------- GPX overlay ----------
+// Parse <trk>/<rte> track points (and lone <wpt>s) into polylines. Returns an
+// array of [ [lat,lng], ... ] segments.
+function parseGPX(text){
+  const doc=new DOMParser().parseFromString(text,'application/xml');
+  if(doc.querySelector('parsererror')) return null;
+  const segs=[];
+  const pull=sel=>{ const pts=[]; doc.querySelectorAll(sel).forEach(p=>{
+    const la=parseFloat(p.getAttribute('lat')), lo=parseFloat(p.getAttribute('lon'));
+    if(isFinite(la)&&isFinite(lo)) pts.push([la,lo]); }); return pts; };
+  doc.querySelectorAll('trkseg').forEach(seg=>{ const pts=[];
+    seg.querySelectorAll('trkpt').forEach(p=>{ const la=parseFloat(p.getAttribute('lat')), lo=parseFloat(p.getAttribute('lon'));
+      if(isFinite(la)&&isFinite(lo)) pts.push([la,lo]); }); if(pts.length>1) segs.push(pts); });
+  const rte=pull('rtept'); if(rte.length>1) segs.push(rte);
+  if(!segs.length){ const wpt=pull('wpt'); if(wpt.length>1) segs.push(wpt); }
+  return segs;
+}
+function setGPX(segs, name){
+  clearGPX();
+  // subtle dark line: a soft white halo for contrast over dark land-use fills,
+  // then a thin dark stroke.
+  const halo=L.layerGroup(), main=L.layerGroup();
+  for(const s of segs){
+    L.polyline(s,{pane:'gpxPane',color:'#ffffff',opacity:.5,weight:4,lineJoin:'round',interactive:false}).addTo(halo);
+    L.polyline(s,{pane:'gpxPane',color:'#1c1f1b',opacity:.65,weight:1.6,lineJoin:'round',interactive:false}).addTo(main);
+  }
+  gpxLayer=L.layerGroup([halo,main]).addTo(map);
+  gpxName=name||'track';
+}
+function clearGPX(){ if(gpxLayer){ map.removeLayer(gpxLayer); gpxLayer=null; gpxName=''; } }
+function gpxFitBounds(){ if(!gpxLayer) return; let b=null;
+  gpxLayer.eachLayer(g=>g.eachLayer(l=>{ const lb=l.getBounds(); b=b?b.extend(lb):lb; }));
+  if(b) map.fitBounds(b,{padding:[30,30]}); }
+function gpxSheet(){
+  openSheet(`<h2>GPX track</h2><p class="sub">Overlay a route as a subtle dark line under the hexes — a reference for drawing, not saved with the map.</p>
+    ${gpxLayer?`<div class="hint">Showing <b>${esc(gpxName)}</b>.</div>`:''}
+    <label>Choose a .gpx file</label>
+    <input type="file" id="gpxFile" accept=".gpx,application/gpx+xml,application/xml,text/xml">
+    <div id="gpxMsg" class="hint"></div>
+    <div class="row end">
+      ${gpxLayer?'<button class="btn ghost" id="gpxClear">Remove track</button>':''}
+      ${gpxLayer?'<button class="btn ghost" id="gpxFit">Zoom to track</button>':''}
+    </div>`);
+  document.getElementById('gpxFile').onchange=e=>{
+    const f=e.target.files[0]; if(!f) return;
+    const rd=new FileReader();
+    rd.onload=()=>{ const segs=parseGPX(String(rd.result));
+      const msg=document.getElementById('gpxMsg');
+      if(!segs||!segs.length){ if(msg) msg.textContent='No track points found in that file.'; return; }
+      setGPX(segs, f.name.replace(/\.gpx$/i,'')); gpxFitBounds(); closeSheet();
+      toast('GPX track loaded'); };
+    rd.readAsText(f);
+  };
+  const cl=document.getElementById('gpxClear'); if(cl) cl.onclick=()=>{ clearGPX(); closeSheet(); toast('Track removed'); };
+  const ft=document.getElementById('gpxFit'); if(ft) ft.onclick=()=>{ gpxFitBounds(); closeSheet(); };
 }
 
 function importSheet(){
@@ -1096,7 +1232,7 @@ async function bootMap(){
   let bar=document.getElementById('countrybar');
   if(!bar){
     bar=document.createElement('div'); bar.id='countrybar'; bar.className='panel';
-    bar.innerHTML='<div class="cb-main"><input type="text" id="countryInput" placeholder="Zoom to a country…" autocomplete="off"><div id="countryResults"></div></div><button id="cbClose" title="Close search" aria-label="Close search">✕</button>';
+    bar.innerHTML='<div class="cb-main"><input type="text" id="countryInput" placeholder="Search country, city or address…" autocomplete="off"><div id="countryResults"></div></div><button id="cbClose" title="Close search" aria-label="Close search">✕</button>';
     bar.querySelector('#cbClose').addEventListener('click',()=>hideCountryBar());
     document.body.appendChild(bar);
     const inp=bar.querySelector('#countryInput');
@@ -1124,28 +1260,29 @@ async function countrySearch(q){
   if(!q){ box.innerHTML=''; return; }
   box.innerHTML='<div class="cr-item muted">Searching…</div>';
   try{
-    // restrict to countries so the list shows clean country names only.
-    const r=await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=6&featureType=country&accept-language=en&q='+encodeURIComponent(q),{headers:{'Accept':'application/json','Accept-Language':'en'}});
+    // general geocoding: countries, cities, streets, addresses — anything OSM knows.
+    const r=await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=6&addressdetails=1&accept-language=en&q='+encodeURIComponent(q),{headers:{'Accept':'application/json','Accept-Language':'en'}});
     let list=await r.json();
-    // belt & suspenders: keep only country-level hits.
-    list=list.filter(p=>p.addresstype==='country'||p.type==='country'||(p.class==='boundary'&&p.addresstype==='country'));
     if(!list.length){ box.innerHTML='<div class="cr-item muted">No matches</div>'; return; }
     box.innerHTML='';
     for(const p of list){
-      const name=p.name || p.display_name.split(',')[0];
+      const name=p.display_name || p.name;
       const it=document.createElement('div'); it.className='cr-item';
-      it.textContent=name;                       // country name only
+      it.textContent=name;                       // full address label
       // Pick a result: jump there, collapse the search, and drop straight into
       // Draw mode. Use pointerup (works for mouse AND touch) instead of click,
       // which mobile browsers can swallow when the input still holds focus.
       const pick=(ev)=>{
         if(ev){ ev.preventDefault(); ev.stopPropagation(); }
-        if(p.boundingbox){ const b=p.boundingbox.map(Number);
+        // a precise address gets a close zoom; a country keeps its bounding box.
+        const pointy = p.addresstype && !['country','state','region'].includes(p.addresstype);
+        if(p.boundingbox && !pointy){ const b=p.boundingbox.map(Number);
           map.fitBounds([[b[0],b[2]],[b[1],b[3]]],{padding:[20,20]});
-        } else map.setView([+p.lat,+p.lon],6);
-        collapseCountryBar(name);
+        } else map.setView([+p.lat,+p.lon], pointy?14:6);
+        const short=(p.name||name).split(',')[0];
+        collapseCountryBar(short);
         setTool('draw');
-        toast('Draw mode · paint land use on '+name);
+        toast('Draw mode · paint land use on '+short);
       };
       it.addEventListener('pointerup',pick);
       // Safari/iOS fallback when Pointer Events are flaky.

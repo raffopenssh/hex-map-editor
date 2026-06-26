@@ -36,6 +36,10 @@ html,body{margin:0;height:100%;font-family:-apple-system,BlinkMacSystemFont,"Seg
 .tool .lbl{font-size:10px;color:var(--muted)}
 .tool.active{background:var(--accent)}
 .tool.active .lbl,.tool.active .ic{color:#fff}
+.tool:disabled{opacity:.32;cursor:default}
+.tool:not(:disabled):hover{background:#f1f0ea}
+.tb-sep{width:1px;align-self:stretch;margin:5px 2px;background:var(--line)}
+#undoBtn .ic,#redoBtn .ic{font-size:20px}
 
 /* brush size control */
 #brushctl{left:12px;top:72px;display:flex;align-items:center;gap:6px;padding:5px 8px}
@@ -124,6 +128,7 @@ html,body{margin:0;height:100%;font-family:-apple-system,BlinkMacSystemFont,"Seg
 
 /* global-mode country search */
 #countrybar{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:1200;width:min(420px,92vw);padding:6px}
+#countrybar input::placeholder{color:var(--muted)}
 #countrybar input{width:100%;border:none;outline:none;background:transparent;font-size:15px;padding:8px 10px}
 #countryResults{margin-top:2px}
 #countryResults .cr-item{padding:8px 10px;border-radius:8px;font-size:13px;cursor:pointer;color:var(--ink)}
@@ -162,5 +167,21 @@ html,body{margin:0;height:100%;font-family:-apple-system,BlinkMacSystemFont,"Seg
   .tool{min-width:42px;padding:9px}
   #brushctl,#selctl{top:66px}
   #brushctl .bz-lbl{display:none}
+  /* On narrow screens the toolbar can't also hold undo/redo without colliding
+     with the top-right buttons. Pull them out into a floating pair docked just
+     above the zoom control — thumb-reachable, out of the way. */
+  .tb-sep{display:none}
+  #undoBtn,#redoBtn{position:fixed;bottom:104px;width:46px;height:46px;min-width:0;
+    padding:0;background:var(--panel);box-shadow:var(--shadow);border-radius:12px;z-index:1000}
+  #redoBtn{right:12px}
+  #undoBtn{right:66px}
   #statusbar{width:calc(100vw - 24px);justify-content:space-between}
+  /* undo/redo stay reachable but lose their text labels like the other tools */
+  #undoBtn,#redoBtn{min-width:40px;padding:9px 7px}
+  .tb-sep{margin:5px 0}
+  /* expanded search floats to the centre of the screen so it's thumb-reachable
+     and never hides behind the toolbar */
+  #countrybar{top:50%;left:50%;transform:translate(-50%,-50%);width:min(440px,92vw);
+    box-shadow:0 8px 40px rgba(20,20,16,.30)}
+  #countrybar input{font-size:16px}
 }

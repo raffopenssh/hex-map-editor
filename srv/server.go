@@ -668,14 +668,111 @@ func (s *Server) autosaveSnapshot(by, mode string) {
 	if last == string(data) {
 		return
 	}
-	name := "Autosave " + time.Now().Format("Jan 2 15:04")
+	// Name the snapshot by what actually changed (the "edit event"), diffing
+	// against the previous autosave — e.g. "Cattle grazing +8 · Hunting −3".
+	// This makes the history list meaningful and self-grouping.
+	var prev map[string]cellState
+	if last != "" {
+		_ = json.Unmarshal([]byte(last), &prev)
+	}
+	name := summarizeEdit(prev, cells)
 	tok := randToken(9)
 	if _, err := s.DB.Exec("INSERT INTO versions(token,name,author,data,kind,mode,view) VALUES(?,?,?,?,'auto',?,?)", tok, name, firstNonEmpty(by, "Editor"), string(data), mode, metaOr(s, "view:"+mode)); err != nil {
 		return
 	}
-	// prune: keep the most recent 50 autosaves per map
-	_, _ = s.DB.Exec(`DELETE FROM versions WHERE kind='auto' AND mode=? AND id NOT IN (
-		SELECT id FROM versions WHERE kind='auto' AND mode=? ORDER BY id DESC LIMIT 50)`, mode, mode)
+	// NB: we intentionally keep the FULL all-time autosave history (no pruning).
+}
+
+// summarizeEdit describes the change from prev->curr as a short, human label so
+// each autosave reads as a meaningful edit event in the history list.
+func summarizeEdit(prev, curr map[string]cellState) string {
+	useDelta := map[string]int{} // label -> net cells gained(+)/lost(-)
+	var wildOn, wildOff, grpChg, noteChg int
+	seen := map[string]bool{}
+	check := func(id string) {
+		if seen[id] {
+			return
+		}
+		seen[id] = true
+		p, q := prev[id], curr[id]
+		if p.U != q.U {
+			if p.U != "" {
+				useDelta[lbl(p.U)]--
+			}
+			if q.U != "" {
+				useDelta[lbl(q.U)]++
+			}
+		}
+		if (p.W != 0) != (q.W != 0) {
+			if q.W != 0 {
+				wildOn++
+			} else {
+				wildOff++
+			}
+		}
+		if p.Grp != q.Grp {
+			grpChg++
+		}
+		if p.Nt != q.Nt {
+			noteChg++
+		}
+	}
+	for id := range curr {
+		check(id)
+	}
+	for id := range prev {
+		check(id)
+	}
+	var parts []string
+	// stable order: follow the legend order, then anything else.
+	order := []string{"settlement", "grazing", "hunting", "fishing", "farming", "wildlife"}
+	emitted := map[string]bool{}
+	emit := func(label string, n int) {
+		if n == 0 || emitted[label] {
+			return
+		}
+		emitted[label] = true
+		sign := "+"
+		if n < 0 {
+			sign = "\u2212" // minus sign
+			n = -n
+		}
+		parts = append(parts, label+" "+sign+strconv.Itoa(n))
+	}
+	for _, k := range order {
+		emit(lbl(k), useDelta[lbl(k)])
+	}
+	for label, n := range useDelta {
+		emit(label, n)
+	}
+	if wildOn > 0 {
+		parts = append(parts, "Wildlife range +"+strconv.Itoa(wildOn))
+	}
+	if wildOff > 0 {
+		parts = append(parts, "Wildlife range \u2212"+strconv.Itoa(wildOff))
+	}
+	if grpChg > 0 {
+		parts = append(parts, "Grouping \u00d7"+strconv.Itoa(grpChg))
+	}
+	if noteChg > 0 {
+		parts = append(parts, "Notes \u00d7"+strconv.Itoa(noteChg))
+	}
+	if len(parts) == 0 {
+		return "Edit " + time.Now().Format("Jan 2 15:04")
+	}
+	// keep it short: at most 3 facets, then an ellipsis.
+	if len(parts) > 3 {
+		parts = append(parts[:3], "\u2026")
+	}
+	return strings.Join(parts, " \u00b7 ")
+}
+
+// lbl is useLabel with an id fallback (useLabel returns "" for unknown ids).
+func lbl(id string) string {
+	if l := useLabel(id); l != "" {
+		return l
+	}
+	return id
 }
 
 func (s *Server) handleVersionGet(w http.ResponseWriter, r *http.Request) {

@@ -26,6 +26,10 @@
   <button class="tool" data-tool="draw" title="Draw (assign use)"><span class="ic">✎</span><span class="lbl">Draw</span></button>
   <button class="tool" data-tool="erase" title="Rubber (clear use)"><span class="ic">⌫</span><span class="lbl">Rubber</span></button>
   <button class="tool" data-tool="select" title="Select hexes"><span class="ic">⬡</span><span class="lbl">Select</span></button>
+  <span class="tb-sep"></span>
+  <button class="tool" id="undoBtn" title="Undo" disabled><span class="ic">↶</span><span class="lbl">Undo</span></button>
+  <button class="tool" id="redoBtn" title="Redo" disabled><span class="ic">↷</span><span class="lbl">Redo</span></button>
+  <span class="tb-sep"></span>
   <button class="tool" id="menuBtn" title="More"><span class="ic">⋯</span><span class="lbl">More</span></button>
 </div>
 
@@ -52,7 +56,7 @@
     <button id="sbNote" class="chip-btn">Note</button>
     <button id="sbClear" class="chip-btn">Clear use</button>
     <button id="sbDelete" class="chip-btn danger">Delete</button>
-    <button id="sbDone" class="chip-btn primary">Done</button>
+    <button id="sbDone" class="chip-btn" title="Clear selection">Deselect</button>
   </span>
 </div>
 
