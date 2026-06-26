@@ -582,6 +582,7 @@ document.querySelectorAll('.bz[data-bz]').forEach(b=>{
 });
 document.getElementById('menuBtn').onclick=openMenu;
 document.getElementById('accountBtn').onclick=openMenu;
+document.getElementById('countryBtn').onclick=showCountryBar;
 
 // ---------- geolocation ("you are here") ----------
 const geoBtn=document.getElementById('geoBtn');
@@ -989,7 +990,7 @@ function gridLoadEl(){
     document.body.appendChild(el); }
   return el;
 }
-function showGridLoad(){ gridLoadEl().classList.add('show'); }
+function showGridLoad(){ gridLoadEl().classList.add('show'); hideCountryBar(); }
 function hideGridLoad(){ const el=document.getElementById('gridload'); if(el) el.classList.remove('show'); }
 
 let regenPending=false, gridLoadShown=false;
@@ -1040,8 +1041,7 @@ async function boot(){
   // persist the view (centre+zoom) for this secret's map as the user pans/zooms,
   // so re-entering with the same secret/link reopens exactly where they left off.
   map.on('moveend', saveViewDebounced);
-  if(me.mode==='global'){ bootGlobal(); return; }
-  bootBoma();
+  bootMap();
 }
 
 // parse a stored view ({lat,lng,zoom}); returns null if absent/invalid.
@@ -1065,30 +1065,46 @@ function saveViewDebounced(){
   }, 600);
 }
 
-// Boma mode: the full hex land-use editor over the seeded data.
-async function bootBoma(){
-  document.body.classList.remove('global-mode');
-  document.body.classList.add('boma-mode');
+// One map per secret. There is no longer a separate "boma" vs "global" UX: a
+// secret either lands on a map that already has cells (e.g. the seeded one) or a
+// blank one, and the saved view / data extent decides where it opens. Country
+// search and geolocation are available everywhere.
+async function bootMap(){
+  document.body.classList.add('global-mode'); // enables country search + hides nothing
   document.getElementById('legendTitle').textContent='Land use';
+  grid=null; cellById=new Map(); state.clear();
   map.setMinZoom(2); map.setMaxZoom(19);
-  sizeCanvas();
-  setTool('pan');
-  // zoom-in hint (shared with global mode)
+  sizeCanvas(); setTool('pan');
+  ctx && ctx.clearRect(0,0,map.getSize().x,map.getSize().y);
+  // zoom-in hint shown when the viewport is too coarse to draw the grid
   if(!document.getElementById('zoomhint')){
     const h=document.createElement('div'); h.id='zoomhint'; h.className='panel';
     h.textContent='Zoom in to draw the 10 km² hex grid';
     document.body.appendChild(h);
   }
+  // load this secret's saved cells (each secret is its own private, persistent map).
   const st=await api('/api/state','GET');
   if(st&&st.cells) applyServerState(st);
-  // restore the secret's last view if we have one; otherwise fit to the data
-  // extent (cell ids encode lat/lon on the lattice).
-  if(!applySavedView(me.view)) fitToData();
+  // open at: the secret's last view → else the data's extent → else the world.
+  if(!applySavedView(me.view)){ if(state.size) fitToData(); else map.setView([20,0], 2); }
   regenGlobalGrid();
   map.on('moveend zoomend', scheduleRegen);
-  // shared version view?
+  // shared version link?
   const vtok=new URLSearchParams(location.search).get('v');
   if(vtok){ loadSharedVersion(vtok); }
+  // country search box (created once)
+  let bar=document.getElementById('countrybar');
+  if(!bar){
+    bar=document.createElement('div'); bar.id='countrybar'; bar.className='panel';
+    bar.innerHTML='<input type="text" id="countryInput" placeholder="Zoom to a country…" autocomplete="off"><div id="countryResults"></div>';
+    document.body.appendChild(bar);
+    const inp=bar.querySelector('#countryInput');
+    let t=null;
+    inp.addEventListener('input',()=>{ clearTimeout(t); t=setTimeout(()=>countrySearch(inp.value.trim()),300); });
+    inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){ clearTimeout(t); countrySearch(inp.value.trim()); } });
+  }
+  // start tucked away unless this is a fresh, empty map needing orientation.
+  if(state.size || parseView(me.view)) hideCountryBar(); else { bar.classList.remove('hidden'); bar.style.display=''; }
   scheduleDraw();
   renderLegend();
 }
@@ -1100,47 +1116,6 @@ function fitToData(){
   for(const id of state.keys()){ const [lon,lat]=gidCentroid(id);
     if(lon<w)w=lon; if(lon>e)e=lon; if(lat<s)s=lat; if(lat>n)n=lat; }
   map.fitBounds([[s,w],[n,e]], {padding:[20,20], maxZoom:11});
-}
-
-// Global mode: a blank world map you can pan / zoom and jump to a country.
-async function bootGlobal(){
-  document.body.classList.remove('boma-mode');
-  document.body.classList.add('global-mode');
-  grid=null; cellById=new Map(); state.clear();
-  map.setMinZoom(2); map.setMaxZoom(19);
-  if(!applySavedView(me.view)) map.setView([20,0], 2);
-  sizeCanvas(); setTool('pan');
-  ctx && ctx.clearRect(0,0,map.getSize().x,map.getSize().y);
-  // zoom-in hint shown when the viewport is too zoomed-out to draw the grid
-  if(!document.getElementById('zoomhint')){
-    const h=document.createElement('div'); h.id='zoomhint'; h.className='panel';
-    h.textContent='Zoom in to draw the 10 km² hex grid';
-    document.body.appendChild(h);
-  }
-  // load this secret's own saved cells (each secret is a private, persistent
-  // map), then regenerate the dynamic grid and keep it in sync on pan/zoom.
-  const st=await api('/api/state','GET');
-  if(st&&st.cells) applyServerState(st);
-  // if there's no saved view but there IS prior data, fit to it on first entry.
-  if(!parseView(me.view) && state.size) fitToData();
-  regenGlobalGrid();
-  map.on('moveend zoomend', scheduleRegen);
-  // shared version link?
-  const vtok=new URLSearchParams(location.search).get('v');
-  if(vtok){ loadSharedVersion(vtok); }
-  // a simple country search box
-  let bar=document.getElementById('countrybar');
-  if(!bar){
-    bar=document.createElement('div'); bar.id='countrybar'; bar.className='panel';
-    bar.innerHTML='<input type="text" id="countryInput" placeholder="Zoom to a country…" autocomplete="off"><div id="countryResults"></div>';
-    document.body.appendChild(bar);
-    const inp=bar.querySelector('#countryInput');
-    let t=null;
-    inp.addEventListener('input',()=>{ clearTimeout(t); t=setTimeout(()=>countrySearch(inp.value.trim()),300); });
-    inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){ clearTimeout(t); countrySearch(inp.value.trim()); } });
-  }
-  bar.style.display='';
-  renderLegend();
 }
 
 async function countrySearch(q){
@@ -1184,6 +1159,17 @@ function collapseCountryBar(name){
   const box=document.getElementById('countryResults'); if(box) box.innerHTML='';
   const inp=document.getElementById('countryInput');
   if(inp){ inp.value=name||''; inp.blur(); }
+  // once a country is chosen (or the grid starts building) the search bar would
+  // just overlap the tools on mobile — tuck it away behind the toolbar button.
+  hideCountryBar();
+}
+// hide / show the floating country search bar. The ⌕ button in the topbar brings
+// it back. Only meaningful in global mode.
+function hideCountryBar(){ const b=document.getElementById('countrybar'); if(b) b.classList.add('hidden'); }
+function showCountryBar(){
+  const b=document.getElementById('countrybar'); if(!b) return;
+  b.classList.remove('hidden'); b.style.display='';
+  const inp=document.getElementById('countryInput'); if(inp){ inp.value=''; inp.focus(); }
 }
 async function loadSharedVersion(tok){
   const r=await api('/api/versions/'+tok,'GET');

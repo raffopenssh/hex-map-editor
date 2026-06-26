@@ -22,13 +22,15 @@ way — simplicity is the point.
   regenerates per viewport (`regenGlobalGrid`, debounced via `scheduleRegen`).
   Do **not** reintroduce a fixed finite grid file as the source of truth.
 - **Per-secret maps.** `modeForSecret` maps each login secret to its own
-  private `mode`: the canonical phrase → `boma` (seeded data); every other
-  secret → a stable `s_<hash>` mode that is its own isolated cell store +
-  version list + saved view. (Legacy: an old build lumped all non-boma secrets
-  into one shared `global` mode; `claimLegacyGlobal` hands that data to the
-  first secret to log in after the change, once.) All maps share the dynamic
-  lattice; `global` mode is the blank-canvas UX (country search) used by the
-  `s_*` secrets.
+  private `mode` (its own isolated cell store + version list + saved view): the
+  canonical phrase → `boma` (the only map that ships seeded data); every other
+  secret → a stable `s_<hash>` mode. There is **no user-facing mode split** —
+  the client has a single boot path (`bootMap`); a secret simply lands on a map
+  that already has cells or a blank one. `boma` is just the mode id where the
+  seed lives, not a different UX. Country search + geolocation are everywhere.
+  (Legacy: an old build lumped all non-boma secrets into one shared `global`
+  mode; `claimLegacyGlobal` hands that data to the first secret to log in after
+  the change, once. The `global-mode` body class remains only as a CSS hook.)
 - **Saved view.** The map centre+zoom is persisted per secret (`view:<mode>`
   meta, `/api/view`) and snapshotted with each version (`versions.view`), so a
   re-login or a shared `?v=` link reopens exactly where the author was.
