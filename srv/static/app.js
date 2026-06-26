@@ -1126,7 +1126,7 @@ function gridLoadEl(){
     document.body.appendChild(el); }
   return el;
 }
-function showGridLoad(){ gridLoadEl().classList.add('show'); hideCountryBar(); }
+function showGridLoad(){ gridLoadEl().classList.add('show'); if(!countryBarPinned) hideCountryBar(); }
 function hideGridLoad(){ const el=document.getElementById('gridload'); if(el) el.classList.remove('show'); }
 
 let regenPending=false, gridLoadShown=false;
@@ -1303,9 +1303,14 @@ function collapseCountryBar(name){
 }
 // hide / show the floating country search bar. The ⌕ button in the topbar brings
 // it back. Only meaningful in global mode.
-function hideCountryBar(){ const b=document.getElementById('countrybar'); if(b) b.classList.add('hidden'); }
+// `countryBarPinned` marks that the user explicitly opened the search; while set,
+// background grid regen (which fires on the keyboard-driven viewport resize) must
+// not yank the bar back away the instant it appears.
+let countryBarPinned=false;
+function hideCountryBar(){ const b=document.getElementById('countrybar'); if(b) b.classList.add('hidden'); countryBarPinned=false; }
 function showCountryBar(){
   const b=document.getElementById('countrybar'); if(!b) return;
+  countryBarPinned=true;
   b.classList.remove('hidden'); b.style.display='';
   const inp=document.getElementById('countryInput'); if(inp){ inp.value=''; inp.focus(); }
 }
